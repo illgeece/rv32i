@@ -88,7 +88,6 @@
          // Write port control (sourced from the WB stage)
          $rf_wr_en = >>3$rd_valid && >>3$rd != 5'b0;
          $rf_wr_index[4:0] = >>3$rd;
-         $rf_wr_data[31:0] = >>3$result;
          // Read port control (combinational, this stage)
          $src1_value[31:0] = /rf[$rs1]$value;
          $src2_value[31:0] = /rf[$rs2]$value;
@@ -96,7 +95,7 @@
          /rf[31:0]
             $my_wr_en = |cpu$rf_wr_en && (|cpu$rf_wr_index == #rf);
             $value[31:0] = |cpu$reset ? 32'b0 :
-                           $my_wr_en ? |cpu$rf_wr_data :
+                           $my_wr_en ? |cpu>>3$rf_wr_data :
                            $RETAIN;
 
          $dec_bits[10:0] = {$instr[30], $funct3, $opcode};
@@ -155,12 +154,21 @@
                          ($is_srai || $is_sra) ? ($src1_value[31] ? ~(~$src1_value >> $src2_or_imm[4:0]) : $src1_value >> $src2_or_imm[4:0]):
                          $is_sub ? $src1_value - $src2_value:
                          32'b0;
+         $addr[31:0] = $src1_value + $imm;
 
       @3 //MEM
-
-
+         //Data Memory
+         $dmem_wr_en = >>2$is_sw;
+         $dmem_index[4:0] = >>1$addr[6:2];
+         $dmem_wr_data[31:0] = >>2$src2_value;
+         /dmem[31:0]
+            $my_wr_en = |cpu$dmem_wr_en && (|cpu$dmem_index == #dmem);
+            $value[31:0] = |cpu$reset ? 32'b0:
+                           $my_wr_en ? |cpu$dmem_wr_data:
+                           $RETAIN;
+         $ld_data[31:0] = /dmem[$dmem_index]$value;
       @4 //WB
-
+         $rf_wr_data[31:0] = <<3$is_lw ? <<1$ld_data : <<2$result;
 
          // Assert these to end simulation (before Makerchip cycle limit).
          //m4+tb()
