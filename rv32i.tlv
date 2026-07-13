@@ -40,24 +40,28 @@
    /* verilator lint_on WIDTH */
 \TLV
    |cpu
-      @0
+      @0 //IF
          $reset = *reset;
-
+         // PC Logic
          $pc[31:0] = >>1$next_pc;
          $next_pc[31:0] = $reset ? 32'b0:
                           >>2$taken_br ? >>2$br_target_pc:
                           $pc + 32'b100;
 
+      @1 //ID
+         //IMem Logic
+         // Single cycle macro based, no SRAM.
          `READONLY_MEM($pc, $$instr[31:0])
-      @1
-         $br_target_pc[31:0] = $pc + $imm;
+
+         //Decoding logic
+         // Two MSBs must be 11 for RV321 instructions so they will be assumed valid and ignored.
          $is_u_instr = $instr[6:2] ==? 5'b0x101;
          $is_i_instr = $instr[6:2] ==? 5'b0000x || $instr[6:2] == 5'b001x0 || $instr[6:2] == 5'b11001;
          $is_s_instr = $instr[6:2] ==? 5'b0100x;
          $is_b_instr = $instr[6:2] == 5'b11000;
          $is_j_instr = $instr[6:2] == 5'b11011;
          $is_r_instr = $instr[6:2] ==? 5'b011x0 || $instr[6:2] == 5'b01011 || $instr[6:2] == 5'b10100;
-          //splitting up instruction signal
+         //splitting up instruction signal
          $funct3[2:0] = $instr[14:12];
          $rs1[4:0] = $instr[19:15];
          $rs2[4:0] = $instr[24:20];
@@ -74,13 +78,30 @@
          $rs1_valid = $funct3_valid;
          $rs2_valid = $is_r_instr || $is_s_instr || $is_b_instr;
          $rd_valid = ($is_r_instr || $is_i_instr || $is_u_instr || $is_j_instr) && $rd != 5'b0;
-         $imm_valid = $is_i_instr || $is_s_instr || $is_b_instr || $is_j_instr || $is_u_instr;
 
-         `BOGUS_USE($rd $rd_valid $rs1 $rs1_valid $rs2 $rs2_valid $opcode $funct3 $funct3_valid $is_u_instr $is_i_instr $is_s_instr $is_b_instr $is_j_instr $is_r_instr $imm_valid
-                 $is_beq $is_bne $is_blt $is_bge $is_bltu $is_bgeu $is_addi $is_add $dec_bits $imm $src1_value $src2_value)
+         `BOGUS_USE($rd $rd_valid $rs1 $rs1_valid $rs2 $rs2_valid $opcode $funct3 $funct3_valid $is_u_instr $is_i_instr $is_s_instr $is_b_instr $is_j_instr $is_r_instr
+                    $is_beq $is_bne $is_blt $is_bge $is_bltu $is_bgeu $is_addi $is_add $dec_bits $imm $src1_value $src2_value $is_lw $is_sw)
+
+
+
+         // Register File
+         // Write port control (sourced from the WB stage)
+         $rf_wr_en = >>3$rd_valid && >>3$rd != 5'b0;
+         $rf_wr_index[4:0] = >>3$rd;
+         $rf_wr_data[31:0] = >>3$result;
+         // Read port control (combinational, this stage)
+         $src1_value[31:0] = /rf[$rs1]$value;
+         $src2_value[31:0] = /rf[$rs2]$value;
+         // The array itself
+         /rf[31:0]
+            $my_wr_en = |cpu$rf_wr_en && (|cpu$rf_wr_index == #rf);
+            $value[31:0] = |cpu$reset ? 32'b0 :
+                           $my_wr_en ? |cpu$rf_wr_data :
+                           $RETAIN;
 
          $dec_bits[10:0] = {$instr[30], $funct3, $opcode};
-          //determining instruction type (funct7_funct3_opcode)
+         $src2_or_imm[31:0] = $is_r_instr ? $src2_value : $imm; //one mux to decide between rs2 and imm
+         //determining instruction type (funct7_funct3_opcode)
          $is_beq = $dec_bits ==? 11'bx_000_1100011;
          $is_bne = $dec_bits ==? 11'bx_001_1100011;
          $is_blt = $dec_bits ==? 11'bx_100_1100011;
@@ -89,14 +110,30 @@
          $is_bgeu = $dec_bits ==? 11'bx_111_1100011;
          $is_addi = $dec_bits ==? 11'bx_000_0010011;
          $is_add = $dec_bits ==? 11'b0_000_0110011;
+         $is_sub = $dec_bits ==? 11'b1_000_0110011;
+         $is_sll = $dec_bits ==? 11'b0_001_0110011;
+         $is_slt = $dec_bits ==? 11'b0_010_0110011;
+         $is_sltu = $dec_bits ==? 11'b0_011_0110011;
+         $is_xor = $dec_bits ==? 11'b0_100_0110011;
+         $is_srl = $dec_bits ==? 11'b0_101_0110011;
+         $is_sra = $dec_bits ==? 11'b1_101_0110011;
+         $is_or = $dec_bits ==? 11'b0_110_0110011;
+         $is_and = $dec_bits ==? 11'b0_111_0110011;
+         $is_slti = $dec_bits ==? 11'bx_010_0010011;
+         $is_sltiu = $dec_bits ==? 11'bx_011_0010011;
+         $is_xori = $dec_bits ==? 11'bx_100_0010011;
+         $is_ori = $dec_bits ==? 11'bx_110_0010011;
+         $is_andi = $dec_bits ==? 11'bx_111_0010011;
+         $is_slli = $dec_bits ==? 11'b0_001_0010011;
+         $is_srli = $dec_bits ==? 11'b0_101_0010011;
+         $is_srai = $dec_bits ==? 11'b1_101_0010011;
+         $is_lw = {$funct3, $opcode} ==? 10'b010_0000011;
+         $is_sw = {$funct3, $opcode} ==? 10'b010_0100011;
 
-      @2
-         //ALU Logic
-         $result[31:0] = $is_addi ? $src1_value + $imm:
-                         $is_add ? $src1_value + $src2_value:
-                         32'b0;
 
-          //Branch Logic
+
+      @2 //ALU
+         //Branch Logic
          $taken_br = $is_b_instr && $is_beq ? $src1_value == $src2_value:
                      $is_b_instr && $is_bne ? $src1_value != $src2_value:
                      $is_b_instr && $is_blt ? ($src1_value < $src2_value) ^ ($src1_value[31] != $src2_value[31]):
@@ -104,13 +141,31 @@
                      $is_b_instr && $is_bltu ? $src1_value < $src2_value:
                      $is_b_instr && $is_bgeu ? $src1_value >= $src2_value:
                      1'b0;
+         $br_target_pc[31:0] = $pc + $imm;
+         //ALU Logic
+         $result[31:0] = ($is_add || $is_addi) ? $src1_value + $src2_or_imm:
+                         ($is_slti || $is_slt) ? {31'b0, ($src1_value < $src2_or_imm) ^ ($src1_value[31] != $src2_or_imm[31])}:
+                         ($is_sltiu || $is_sltu) ? {31'b0, ($src1_value < $src2_or_imm)}:
+                         ($is_xori || $is_xor) ? $src1_value ^ $src2_or_imm:
+                         ($is_ori || $is_or) ? $src1_value | $src2_or_imm:
+                         ($is_andi || $is_and) ? $src1_value & $src2_or_imm:
+                         ($is_slli || $is_sll) ? $src1_value << $src2_or_imm[4:0]:
+                         ($is_srli || $is_srl) ? $src1_value >> $src2_or_imm[4:0]:
+                         //bit flip hack to sign extend without $signed from SV
+                         ($is_srai || $is_sra) ? ($src1_value[31] ? ~(~$src1_value >> $src2_or_imm[4:0]) : $src1_value >> $src2_or_imm[4:0]):
+                         $is_sub ? $src1_value - $src2_value:
+                         32'b0;
 
-           // Assert these to end simulation (before Makerchip cycle limit).
-         m4+tb()
+      @3 //MEM
+
+
+      @4 //WB
+
+
+         // Assert these to end simulation (before Makerchip cycle limit).
+         //m4+tb()
          *failed = *cyc_cnt > M4_MAX_CYC;
-          //Reg File preprocessor macro
-   m4+rf(32, 32, /cpu$reset, /cpu$rd_valid, /cpu$rd, /cpu$result[31:0], /cpu$rs1_valid, /cpu$rs1, /cpu$src1_value, /cpu$rs2_valid, /cpu$rs2, /cpu$src2_value)
          //m4+dmem(32, 32, $reset, $addr[4:0], $wr_en, $wr_data[31:0], $rd_en, $rd_data)
-   m4+cpu_viz()
+         //m4+cpu_viz()
 \SV
    endmodule
