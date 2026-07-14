@@ -132,35 +132,58 @@
 
 
       @2 //ALU
+         //Forwarding Control Signals
+         //Path to EX/MEM
+         $rs1_fwd_mem = $rs1_valid && >>1$rd_valid && (>>1$rd == $rs1);
+         $rs2_fwd_mem = $rs2_valid && >>1$rd_valid && (>>1$rd == $rs2);
+         //Path to MEM/WB
+         $rs1_fwd_wb = $rs1_valid && >>2$rd_valid && (>>2$rd == $rs1);
+         $rs2_fwd_wb = $rs2_valid && >>2$rd_valid && (>>2$rd == $rs2);
+         //Forwarding Data Logic
+         //EX/MEM, only load cases
+         $mem_fwd_value[31:0] = >>1$is_lw ? >>1$ld_data : >>1$result;
+         //MEM/WB rf_wr_data already gated by load condition
+         $wb_fwd_value[31:0] = >>2$rf_wr_data;
+         //Control Logic
+         $src1_value_fwd[31:0] = $rs1_fwd_mem ? $mem_fwd_value:
+                           $rs1_fwd_wb ? $wb_fwd_value:
+                           $src1_value;
+         $src2_value_fwd[31:0] = $rs2_fwd_mem ? $mem_fwd_value:
+                           $rs2_fwd_wb ? $wb_fwd_value:
+                           $src2_value;
+
          //Branch Logic
-         $taken_br = $is_b_instr && $is_beq ? $src1_value == $src2_value:
-                     $is_b_instr && $is_bne ? $src1_value != $src2_value:
-                     $is_b_instr && $is_blt ? ($src1_value < $src2_value) ^ ($src1_value[31] != $src2_value[31]):
-                     $is_b_instr && $is_bge ? ($src1_value >= $src2_value) ^ ($src1_value[31] != $src2_value[31]):
-                     $is_b_instr && $is_bltu ? $src1_value < $src2_value:
-                     $is_b_instr && $is_bgeu ? $src1_value >= $src2_value:
+         $src2_or_imm_fwd[31:0] = $is_r_instr ? $src2_value_fwd : $imm;
+         $taken_br = $is_b_instr && $is_beq ? $src1_value_fwd == $src2_value_fwd:
+                     $is_b_instr && $is_bne ? $src1_value_fwd != $src2_value_fwd:
+                     $is_b_instr && $is_blt ? ($src1_value_fwd < $src2_value_fwd) ^ ($src1_value_fwd[31] != $src2_value_fwd[31]):
+                     $is_b_instr && $is_bge ? ($src1_value_fwd >= $src2_value_fwd) ^ ($src1_value_fwd[31] != $src2_value_fwd[31]):
+                     $is_b_instr && $is_bltu ? $src1_value_fwd < $src2_value_fwd:
+                     $is_b_instr && $is_bgeu ? $src1_value_fwd >= $src2_value_fwd:
                      1'b0;
          $br_target_pc[31:0] = $pc + $imm;
+
          //ALU Logic
-         $result[31:0] = ($is_add || $is_addi) ? $src1_value + $src2_or_imm:
-                         ($is_slti || $is_slt) ? {31'b0, ($src1_value < $src2_or_imm) ^ ($src1_value[31] != $src2_or_imm[31])}:
-                         ($is_sltiu || $is_sltu) ? {31'b0, ($src1_value < $src2_or_imm)}:
-                         ($is_xori || $is_xor) ? $src1_value ^ $src2_or_imm:
-                         ($is_ori || $is_or) ? $src1_value | $src2_or_imm:
-                         ($is_andi || $is_and) ? $src1_value & $src2_or_imm:
-                         ($is_slli || $is_sll) ? $src1_value << $src2_or_imm[4:0]:
-                         ($is_srli || $is_srl) ? $src1_value >> $src2_or_imm[4:0]:
+         $result[31:0] = ($is_add || $is_addi) ? $src1_value_fwd + $src2_or_imm_fwd:
+                         ($is_slti || $is_slt) ? {31'b0, ($src1_value_fwd < $src2_or_imm_fwd) ^ ($src1_value_fwd[31] != $src2_or_imm_fwd[31])}:
+                         ($is_sltiu || $is_sltu) ? {31'b0, ($src1_value_fwd < $src2_or_imm_fwd)}:
+                         ($is_xori || $is_xor) ? $src1_value_fwd ^ $src2_or_imm_fwd:
+                         ($is_ori || $is_or) ? $src1_value_fwd | $src2_or_imm_fwd:
+                         ($is_andi || $is_and) ? $src1_value_fwd & $src2_or_imm_fwd:
+                         ($is_slli || $is_sll) ? $src1_value_fwd << $src2_or_imm_fwd[4:0]:
+                         ($is_srli || $is_srl) ? $src1_value_fwd >> $src2_or_imm_fwd[4:0]:
                          //bit flip hack to sign extend without $signed from SV
-                         ($is_srai || $is_sra) ? ($src1_value[31] ? ~(~$src1_value >> $src2_or_imm[4:0]) : $src1_value >> $src2_or_imm[4:0]):
-                         $is_sub ? $src1_value - $src2_value:
+                         ($is_srai || $is_sra) ? ($src1_value_fwd[31] ? ~(~$src1_value_fwd >> $src2_or_imm_fwd[4:0]) : $src1_value_fwd >> $src2_or_imm_fwd[4:0]):
+                         $is_sub ? $src1_value_fwd - $src2_value_fwd:
                          32'b0;
-         $addr[31:0] = $src1_value + $imm;
+         $addr[31:0] = $src1_value_fwd + $imm;
+
 
       @3 //MEM
          //Data Memory
          $dmem_wr_en = >>2$is_sw;
          $dmem_index[4:0] = >>1$addr[6:2];
-         $dmem_wr_data[31:0] = >>2$src2_value;
+         $dmem_wr_data[31:0] = >>1$src2_or_imm_fwd;
          /dmem[31:0]
             $my_wr_en = |cpu$dmem_wr_en && (|cpu$dmem_index == #dmem);
             $value[31:0] = |cpu$reset ? 32'b0:
