@@ -8,10 +8,17 @@ PIPELINING:
     The array is an array of pipelines, essentially 32 copies of the same array differentiated by its own 'scopename' signal, in this case the index rs1/rs2. The entire register file structure itself is only five lines of TL-Verilog.
   Worrying about hazards will be done once at least the data memory is complete so I can worry about stalling and forwarding at the same time. There are currently no plans to dynamically reorder operations so really only RAW hazards are the focus.
 
-  Full Instruction Decode: Only a few operations were covered by the course so I needed to expand the ISA and make a few design decisions:
+  Full Instruction Decode: Only a few operations were covered by the course so The ISA needed expansion which required a few design decisions:
     1. There are only going to be word operations.
     2. The arithmetic shift operation required a bit hack to replace the $signed operator that TL-Verilog reads as a variable rather than a function. If there is a way to register names as signal calls I do not know it.
 
-  Instruction Memory:
 
-  Data Memory:
+Forwarding and other hazard detection:
+  No OOE, only RAW hazards
+  No stalls, values are valid on rising edge so clock drift would mess this up
+  No latency from memory right now so no stall logic either
+  Two forwarding paths: at the ALU stage the source register signals split into two that are multiplexed with the source and destination valid signals as well as a comparator between the source and destination register. Below is one of four lines for control signals. The data signals follow a similar format.
+    $rs1_fwd_mem = $rs1_valid && >>1$rd_valid && (>>1$rd == $rs1);
+  The alignment operator (>>) allows for an easy reference to another pipeline's value that fits in the same line of logic and automatically places a fowarding path between the stages.
+
+  At this point I wrote a series of test instructions that targeted these RAW hazards and debugged until the instructions all executed correctly. The next step is adding branch validity logic.

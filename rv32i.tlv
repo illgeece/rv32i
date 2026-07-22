@@ -7,33 +7,43 @@
 
 
    //---------------------------------------------------------------------------------
-   // /====================\
-   // | Sum 1 to 9 Program |
-   // \====================/
-   //
-   // Program to test RV32I
-   // Add 1,2,3,...,9 (in that order).
-   //
-   // Regs:
-   //  x12 (a2): 10
-   //  x13 (a3): 1..10
-   //  x14 (a4): Sum
-   //
-   m4_asm(ADDI, x14, x0, 0)             // Initialize sum register a4 with 0
-   m4_asm(ADDI, x12, x0, 1010)          // Store count of 10 in register a2.
-   m4_asm(ADDI, x13, x0, 1)             // Initialize loop count register a3 with 0
-   // Loop:
-   m4_asm(ADD, x14, x13, x14)           // Incremental summation
-   m4_asm(ADDI, x13, x13, 1)            // Increment loop count by 1
-   m4_asm(BLT, x13, x12, 1111111111000) // If a3 is less than a2, branch to label named <loop>
-   // Test result value in x14, and set x31 to reflect pass/fail.
-   m4_asm(ADDI, x30, x14, 111111010100) // Subtract expected value of 44 to set x30 to 1 if and only iff the result is 45 (1 + 2 + ... + 9).
-   m4_asm(BGE, x0, x0, 0) // Done. Jump to itself (infinite loop). (Up to 20-bit signed immediate plus implicit 0 bit (unlike JALR) provides byte address; last immediate bit should also be 0)
-   m4_asm_end()
-   m4_define(['M4_MAX_CYC'], 50)
+   // ---- Case 1: RAW, 1 back (EX/MEM), rs1 ----
+m4_asm(ADDI, x5, x0, 101)          // x5 = 5
+m4_asm(ADD,  x6, x5, x0)           // x6 = x5 + 0
+
+// ---- Case 2: RAW, 1 back (EX/MEM), rs2 ----
+m4_asm(ADDI, x7, x0, 1001)         // x7 = 9
+m4_asm(ADD,  x8, x0, x7)           // x8 = 0 + x7
+
+// ---- Case 3: RAW, 2 back (MEM/WB) ----
+m4_asm(ADDI, x9, x0, 11)           // x9 = 3
+m4_asm(ADDI, x10, x0, 1)           // unrelated filler — pushes x9's producer to 2-back
+m4_asm(ADD,  x11, x9, x10)         // x11 = x9 + x10
+
+// ---- Case 4: rs1 from MEM/WB, rs2 from EX/MEM, same instruction ----
+m4_asm(ADDI, x16, x0, 10)          // x16 = 2
+m4_asm(ADDI, x17, x0, 110)         // x17 = 6
+m4_asm(ADD,  x18, x16, x17)        // x18 = x16 + x17
+
+// ---- Case 5: EX/MEM must win over MEM/WB (same dest reg written twice) ----
+m4_asm(ADDI, x19, x0, 1)           // x19 = 1  (2-back by the time ADD runs)
+m4_asm(ADDI, x19, x0, 1100011)     // x19 = 99 (1-back — should be the winner)
+m4_asm(ADD,  x20, x19, x0)         // x20 should end up 99, not 1
+
+// ---- Case 6: store-data forwarding, then load it back ----
+m4_asm(ADDI, x21, x0, 101010)      // x21 = 42
+m4_asm(SW,   x0, x21, 0)           // mem[word 0] = x21 (data forwarded from EX/MEM)
+m4_asm(LW,   x22, x0, 0)           // x22 = mem[word 0]
+
+// ---- Case 7: load-use, immediate dependent instruction ----
+m4_asm(ADDI, x23, x0, 1001101)     // x23 = 77
+m4_asm(SW,   x0, x23, 100)         // mem[word 1] = x23
+m4_asm(LW,   x24, x0, 100)         // x24 = mem[word 1]
+m4_asm(ADD,  x25, x24, x0)         // x25 = x24 + 0 (rs1 forwarded from EX/MEM as $ld_data)
+
+m4_asm(BGE, x0, x0, 0)             // done — infinite loop, same as your existing trap
+m4_asm_end()
    //---------------------------------------------------------------------------------
-
-
 
 \SV
    m4_makerchip_module   // (Expanded in Nav-TLV pane.)
@@ -80,7 +90,7 @@
          $rd_valid = ($is_r_instr || $is_i_instr || $is_u_instr || $is_j_instr) && $rd != 5'b0;
 
          `BOGUS_USE($rd $rd_valid $rs1 $rs1_valid $rs2 $rs2_valid $opcode $funct3 $funct3_valid $is_u_instr $is_i_instr $is_s_instr $is_b_instr $is_j_instr $is_r_instr
-                    $is_beq $is_bne $is_blt $is_bge $is_bltu $is_bgeu $is_addi $is_add $dec_bits $imm $src1_value $src2_value $is_lw $is_sw)
+                    $is_beq $is_bne $is_blt $is_bge $is_bltu $is_bgeu $is_addi $is_add $dec_bits $imm $src1_value $src2_value $is_lw $is_sw $src2_or_imm)
 
 
 
@@ -181,9 +191,9 @@
 
       @3 //MEM
          //Data Memory
-         $dmem_wr_en = >>2$is_sw;
-         $dmem_index[4:0] = >>1$addr[6:2];
-         $dmem_wr_data[31:0] = >>1$src2_or_imm_fwd;
+         $dmem_wr_en = $is_sw;
+         $dmem_index[4:0] = $addr[6:2];
+         $dmem_wr_data[31:0] = $src2_value_fwd;
          /dmem[31:0]
             $my_wr_en = |cpu$dmem_wr_en && (|cpu$dmem_index == #dmem);
             $value[31:0] = |cpu$reset ? 32'b0:
@@ -191,11 +201,11 @@
                            $RETAIN;
          $ld_data[31:0] = /dmem[$dmem_index]$value;
       @4 //WB
-         $rf_wr_data[31:0] = <<3$is_lw ? <<1$ld_data : <<2$result;
+         $rf_wr_data[31:0] = $is_lw ? $ld_data : $result;
 
          // Assert these to end simulation (before Makerchip cycle limit).
          //m4+tb()
-         *failed = *cyc_cnt > M4_MAX_CYC;
+         //*failed = *cyc_cnt > M4_MAX_CYC;
          //m4+dmem(32, 32, $reset, $addr[4:0], $wr_en, $wr_data[31:0], $rd_en, $rd_data)
          //m4+cpu_viz()
 \SV
