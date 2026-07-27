@@ -4,46 +4,83 @@
 
    m4_include_lib(['https://raw.githubusercontent.com/stevehoover/LF-Building-a-RISC-V-CPU-Core/main/lib/risc-v_shell_lib.tlv'])
 
+// ---- Setup: operands used by both R-type and I-type tests ----
+m4_asm(ADDI, x1, x0, 101)              // x1 = 5
+m4_asm(ADDI, x2, x0, 11)               // x2 = 3
+m4_asm(ADDI, x3, x0, 1)                // x3 = 1  (shift amount)
+m4_asm(ADDI, x4, x0, 111111111111)     // x4 = -1 = 0xFFFFFFFF (12-bit imm, all ones, sign-extended)
 
+// ---- R-type ALU ops (x1=5, x2=3, x3=1, x4=0xFFFFFFFF) ----
+m4_asm(ADD,  x5,  x1, x2)              // x5  = 8            (5+3)
+m4_asm(SUB,  x6,  x1, x2)              // x6  = 2            (5-3)
+m4_asm(AND,  x7,  x1, x2)              // x7  = 1            (5&3)
+m4_asm(OR,   x8,  x1, x2)              // x8  = 7            (5|3)
+m4_asm(XOR,  x9,  x1, x2)              // x9  = 6            (5^3)
+m4_asm(SLT,  x10, x2, x1)              // x10 = 1            (3 < 5, signed)
+m4_asm(SLTU, x11, x2, x1)              // x11 = 1            (3 < 5, unsigned)
+m4_asm(SLL,  x12, x1, x3)              // x12 = 10           (5 << 1)
+m4_asm(SRL,  x13, x1, x3)              // x13 = 2            (5 >> 1)
+m4_asm(SRA,  x14, x4, x3)              // x14 = 0xFFFFFFFF   (-1 >>> 1, arithmetic, stays all-ones)
 
-   //---------------------------------------------------------------------------------
-   // ---- Case 1: RAW, 1 back (EX/MEM), rs1 ----
-m4_asm(ADDI, x5, x0, 101)          // x5 = 5
-m4_asm(ADD,  x6, x5, x0)           // x6 = x5 + 0
+// ---- I-type ALU ops (x1=5, x4=0xFFFFFFFF as base) ----
+m4_asm(ADDI,  x15, x1, 11)             // x15 = 8            (5+3)
+m4_asm(SLTI,  x16, x1, 1010)           // x16 = 1            (5 < 10, signed)
+m4_asm(SLTIU, x17, x1, 1010)           // x17 = 1            (5 < 10, unsigned)
+m4_asm(XORI,  x18, x1, 11)             // x18 = 6            (5^3)
+m4_asm(ORI,   x19, x1, 11)             // x19 = 7            (5|3)
+m4_asm(ANDI,  x20, x1, 11)             // x20 = 1            (5&3)
+m4_asm(SLLI,  x21, x1, 1)              // x21 = 10           (5 << 1)
+m4_asm(SRLI,  x22, x1, 1)              // x22 = 2            (5 >> 1)
+m4_asm(SRAI,  x23, x4, 1)              // x23 = 0xFFFFFFFF   (-1 >>> 1)
 
-// ---- Case 2: RAW, 1 back (EX/MEM), rs2 ----
-m4_asm(ADDI, x7, x0, 1001)         // x7 = 9
-m4_asm(ADD,  x8, x0, x7)           // x8 = 0 + x7
+// ---- Load/Store ----
+m4_asm(SW, x0, x1, 0)                  // mem[word 0] = x1 (5)
+m4_asm(LW, x24, x0, 0)                 // x24 = 5   (loads back what was just stored)
 
-// ---- Case 3: RAW, 2 back (MEM/WB) ----
-m4_asm(ADDI, x9, x0, 11)           // x9 = 3
-m4_asm(ADDI, x10, x0, 1)           // unrelated filler — pushes x9's producer to 2-back
-m4_asm(ADD,  x11, x9, x10)         // x11 = x9 + x10
+// ---- Branches: each sets a poison bit in x25 IF the shadow-squash after a taken
 
-// ---- Case 4: rs1 from MEM/WB, rs2 from EX/MEM, same instruction ----
-m4_asm(ADDI, x16, x0, 10)          // x16 = 2
-m4_asm(ADDI, x17, x0, 110)         // x17 = 6
-m4_asm(ADD,  x18, x16, x17)        // x18 = x16 + x17
+m4_asm(ADDI, x25, x0, 0)               // corruption mask = 0
 
-// ---- Case 5: EX/MEM must win over MEM/WB (same dest reg written twice) ----
-m4_asm(ADDI, x19, x0, 1)           // x19 = 1  (2-back by the time ADD runs)
-m4_asm(ADDI, x19, x0, 1100011)     // x19 = 99 (1-back — should be the winner)
-m4_asm(ADD,  x20, x19, x0)         // x20 should end up 99, not 1
+m4_asm(BEQ,  x2, x2, 1000)             // taken (3==3)   -> should skip next instr
+m4_asm(ORI,  x25, x25, 1)              // bit0: BEQ squash failed if this executes
 
-// ---- Case 6: store-data forwarding, then load it back ----
-m4_asm(ADDI, x21, x0, 101010)      // x21 = 42
-m4_asm(SW,   x0, x21, 0)           // mem[word 0] = x21 (data forwarded from EX/MEM)
-m4_asm(LW,   x22, x0, 0)           // x22 = mem[word 0]
+m4_asm(BNE,  x1, x2, 1000)             // taken (5!=3)
+m4_asm(ORI,  x25, x25, 10)             // bit1: BNE
 
-// ---- Case 7: load-use, immediate dependent instruction ----
-m4_asm(ADDI, x23, x0, 1001101)     // x23 = 77
-m4_asm(SW,   x0, x23, 100)         // mem[word 1] = x23
-m4_asm(LW,   x24, x0, 100)         // x24 = mem[word 1]
-m4_asm(ADD,  x25, x24, x0)         // x25 = x24 + 0 (rs1 forwarded from EX/MEM as $ld_data)
+m4_asm(BLT,  x2, x1, 1000)             // taken (3<5, signed)
+m4_asm(ORI,  x25, x25, 100)            // bit2: BLT
 
-m4_asm(BGE, x0, x0, 0)             // done — infinite loop, same as your existing trap
+m4_asm(BGE,  x1, x2, 1000)             // taken (5>=3, signed)
+m4_asm(ORI,  x25, x25, 1000)           // bit3: BGE
+
+m4_asm(BLTU, x2, x1, 1000)             // taken (3<5, unsigned)
+m4_asm(ORI,  x25, x25, 10000)          // bit4: BLTU
+
+m4_asm(BGEU, x1, x2, 1000)             // taken (5>=3, unsigned)
+m4_asm(ORI,  x25, x25, 100000)         // bit5: BGEU
+
+// ---- JAL: same shadow-squash idea, plus checks the link value (pc+4) ----
+m4_asm(JAL, x26, 100)                 // jump +8, x26 = link = this instr's addr + 4
+m4_asm(ORI, x25, x25, 1000000)         // bit6: JAL squash failed if this executes
+
+// ---- JALR: rs1=x0 makes the imm an absolute target (0+imm), which sidesteps
+// needing AUIPC/another register just to build a base address for this test.
+// Two-cycle shadow (needs the forwarding network, unlike JAL) — this is the
+// direct regression test for the >>1$valid chain fix.
+m4_asm(JALR, x27, x0, 10101000)        // absolute target = 168, x27 = link = this instr's addr + 4
+m4_asm(ORI,  x25, x25, 10000000)       // bit7: JALR squash failed if this executes
+
+// ---- LUI / AUIPC (this is also the JALR landing point) ----
+m4_asm(LUI,   x28, 1)                  // x28 = 4096  (1 << 12)
+m4_asm(AUIPC, x29, 1)                  // x29 = (this instr's own address) + 4096
+
+// ---- Not-taken confirmation: proves a branch that SHOULD fall through actually does
+m4_asm(ADDI, x30, x0, 0)               // 0 = "not yet confirmed"
+m4_asm(BEQ,  x1, x2, 1000)             // NOT taken (5 != 3) -> should fall through
+m4_asm(ADDI, x30, x0, 1)               // should execute -> x30 = 1 confirms correct fallthrough
+
+m4_asm(BGE, x0, x0, 0)                 // done — infinite loop
 m4_asm_end()
-   //---------------------------------------------------------------------------------
 
 \SV
    m4_makerchip_module   // (Expanded in Nav-TLV pane.)
@@ -53,9 +90,16 @@ m4_asm_end()
       @0 //IF
          $reset = *reset;
          // PC Logic
+         $bht_index_f[4:0] = $pc[6:2];
+         $pred_taken_f = /bht[$bht_index_f]>>1$ctr[1];
+         $br_predicted_pc_f[31:0] = /btb[$bht_index_f]>>1$value;
+
          $pc[31:0] = >>1$next_pc;
          $next_pc[31:0] = $reset ? 32'b0:
-                          >>2$taken_br ? >>2$br_target_pc:
+                          >>2$valid_mispredicted ? (>>2$taken_br ? >>2$br_target_pc : >>2$pc + 32'b100) :
+                          >>1$valid_jal ? >>1$br_target_pc: //resolves in ID
+                          >>2$valid_jalr ? >>2$jalr_target_pc: //resolves in EX
+                          $pred_taken_f ? $br_predicted_pc_f:
                           $pc + 32'b100;
 
       @1 //ID
@@ -63,20 +107,55 @@ m4_asm_end()
          // Single cycle macro based, no SRAM.
          `READONLY_MEM($pc, $$instr[31:0])
 
+         //exception handling signals
+         $trap = $illegal_instr || $is_ecall || $is_ebreak;
+         $valid = !$reset && !$trap
+                  && !>>1$valid_jal
+                  && !>>1$valid_jalr && !>>2$valid_jalr
+                  && !>>1$valid_mispredicted && !>>2$valid_mispredicted;
+         $valid_jal  = $valid && $is_jal;
+         $valid_jalr = $valid && $is_jalr;
+
+         //branch history table and branch target buffer
+         /bht[31:0]
+            $my_update = |cpu>>1$valid && |cpu>>1$is_b_instr && (|cpu>>1$bht_index_f == #bht);
+            $ctr[1:0] = |cpu$reset ? 2'b01:
+                        $my_update ? (|cpu>>1$taken_br ? ($ctr == 2'b11 ? 2'b11 : $ctr + 2'b01):
+                                                         ($ctr == 2'b00 ? 2'b00 : $ctr - 2'b01)):
+                        $RETAIN;
+         /btb[31:0]
+            $my_update = |cpu>>1$valid && |cpu>>1$taken_br && (|cpu>>1$bht_index_f == #btb);
+            $value[31:0] = |cpu$reset ? 32'b0:
+                           $my_update ? |cpu>>1$br_target_pc:
+                           $RETAIN;
+
          //Decoding logic
-         // Two MSBs must be 11 for RV321 instructions so they will be assumed valid and ignored.
-         $is_u_instr = $instr[6:2] ==? 5'b0x101;
-         $is_i_instr = $instr[6:2] ==? 5'b0000x || $instr[6:2] == 5'b001x0 || $instr[6:2] == 5'b11001;
-         $is_s_instr = $instr[6:2] ==? 5'b0100x;
-         $is_b_instr = $instr[6:2] == 5'b11000;
-         $is_j_instr = $instr[6:2] == 5'b11011;
-         $is_r_instr = $instr[6:2] ==? 5'b011x0 || $instr[6:2] == 5'b01011 || $instr[6:2] == 5'b10100;
          //splitting up instruction signal
          $funct3[2:0] = $instr[14:12];
          $rs1[4:0] = $instr[19:15];
          $rs2[4:0] = $instr[24:20];
          $rd[4:0] = $instr[11:7];
          $opcode[6:0] = $instr[6:0];
+         // opcodes
+         $is_lui    = $opcode == 7'b0110111;
+         $is_auipc  = $opcode == 7'b0010111;
+         $is_jal    = $opcode == 7'b1101111;
+         $is_jalr   = $opcode == 7'b1100111;
+         $is_branch = $opcode == 7'b1100011;
+         $is_load   = $opcode == 7'b0000011;
+         $is_store  = $opcode == 7'b0100011;
+         $is_opimm  = $opcode == 7'b0010011;
+         $is_op     = $opcode == 7'b0110011;
+         $is_fence  = $opcode == 7'b0001111;
+         $is_system = $opcode == 7'b1110011;
+         //instruction formats
+         $is_i_instr = $is_load || $is_opimm || $is_jalr;
+         $is_s_instr = $is_store;
+         $is_b_instr = $is_branch;
+         $is_u_instr = $is_lui || $is_auipc;
+         $is_j_instr = $is_jal;
+         $is_r_instr = $is_op;
+         //immediate
          $imm[31:0] = $is_i_instr ? { {21{$instr[31]}}, $instr[30:20]}:
                       $is_s_instr ? { {21{$instr[31]}}, $instr[30:25], $instr[11:7]}:
                       $is_b_instr ? { {20{$instr[31]}}, $instr[7], $instr[30:25], $instr[11:8], 1'b0}:
@@ -85,18 +164,28 @@ m4_asm_end()
                       32'b0;
          // valid fields
          $funct3_valid = $is_r_instr || $is_i_instr || $is_s_instr || $is_b_instr;
-         $rs1_valid = $funct3_valid;
+         $rs1_valid = $is_r_instr || $is_i_instr || $is_s_instr || $is_b_instr;
          $rs2_valid = $is_r_instr || $is_s_instr || $is_b_instr;
          $rd_valid = ($is_r_instr || $is_i_instr || $is_u_instr || $is_j_instr) && $rd != 5'b0;
+         // SYSTEM sub-decode
+         $is_ecall  = $is_system && ($funct3 == 3'b000) && ($instr[31:20] == 12'b0);
+         $is_ebreak = $is_system && ($funct3 == 3'b000) && ($instr[31:20] == 12'b1);
+         //illegal instruction signal
+         $illegal_instr = !($is_lui || $is_auipc || $is_jal || $is_jalr || $is_branch
+                    || $is_load || $is_store || $is_opimm || $is_op
+                    || $is_fence || $is_system);
 
+         //branch target address
+         $br_target_pc[31:0] = $pc + $imm;
+
+         //silencing signals
          `BOGUS_USE($rd $rd_valid $rs1 $rs1_valid $rs2 $rs2_valid $opcode $funct3 $funct3_valid $is_u_instr $is_i_instr $is_s_instr $is_b_instr $is_j_instr $is_r_instr
-                    $is_beq $is_bne $is_blt $is_bge $is_bltu $is_bgeu $is_addi $is_add $dec_bits $imm $src1_value $src2_value $is_lw $is_sw $src2_or_imm)
-
-
+                    $is_beq $is_bne $is_blt $is_bge $is_bltu $is_bgeu $is_addi $is_add $dec_bits $imm $src1_value $src2_value $is_lw $is_sw $src2_or_imm
+                    $illegal_instr $is_ebreak $is_ecall)
 
          // Register File
          // Write port control (sourced from the WB stage)
-         $rf_wr_en = >>3$rd_valid && >>3$rd != 5'b0;
+         $rf_wr_en = >>3$rd_valid && >>3$rd != 5'b0 && >>3$valid;
          $rf_wr_index[4:0] = >>3$rd;
          // Read port control (combinational, this stage)
          $src1_value[31:0] = /rf[$rs1]$value;
@@ -105,7 +194,7 @@ m4_asm_end()
          /rf[31:0]
             $my_wr_en = |cpu$rf_wr_en && (|cpu$rf_wr_index == #rf);
             $value[31:0] = |cpu$reset ? 32'b0 :
-                           $my_wr_en ? |cpu>>3$rf_wr_data :
+                           $my_wr_en ? |cpu>>3$rf_wr_data:
                            $RETAIN;
 
          $dec_bits[10:0] = {$instr[30], $funct3, $opcode};
@@ -171,8 +260,8 @@ m4_asm_end()
                      $is_b_instr && $is_bltu ? $src1_value_fwd < $src2_value_fwd:
                      $is_b_instr && $is_bgeu ? $src1_value_fwd >= $src2_value_fwd:
                      1'b0;
-         $br_target_pc[31:0] = $pc + $imm;
-
+         $mispredicted = $is_b_instr && (($taken_br != $pred_taken_f) || ($taken_br && $pred_taken_f && ($br_target_pc != $br_predicted_pc_f)));
+         $valid_mispredicted = $valid && $mispredicted;
          //ALU Logic
          $result[31:0] = ($is_add || $is_addi) ? $src1_value_fwd + $src2_or_imm_fwd:
                          ($is_slti || $is_slt) ? {31'b0, ($src1_value_fwd < $src2_or_imm_fwd) ^ ($src1_value_fwd[31] != $src2_or_imm_fwd[31])}:
@@ -185,13 +274,16 @@ m4_asm_end()
                          //bit flip hack to sign extend without $signed from SV
                          ($is_srai || $is_sra) ? ($src1_value_fwd[31] ? ~(~$src1_value_fwd >> $src2_or_imm_fwd[4:0]) : $src1_value_fwd >> $src2_or_imm_fwd[4:0]):
                          $is_sub ? $src1_value_fwd - $src2_value_fwd:
+                         $is_lui ? $imm:
+                         $is_auipc ? $pc + $imm:
+                         ($is_jal || $is_jalr) ? ($pc + 32'b100):
                          32'b0;
          $addr[31:0] = $src1_value_fwd + $imm;
-
+         $jalr_target_pc[31:0] =  ($src1_value_fwd + $imm) & ~32'b1;
 
       @3 //MEM
          //Data Memory
-         $dmem_wr_en = $is_sw;
+         $dmem_wr_en = $is_sw && $valid;
          $dmem_index[4:0] = $addr[6:2];
          $dmem_wr_data[31:0] = $src2_value_fwd;
          /dmem[31:0]
