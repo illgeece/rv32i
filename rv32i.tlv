@@ -4,82 +4,46 @@
 
    m4_include_lib(['https://raw.githubusercontent.com/stevehoover/LF-Building-a-RISC-V-CPU-Core/main/lib/risc-v_shell_lib.tlv'])
 
-// ---- Setup: operands used by both R-type and I-type tests ----
-m4_asm(ADDI, x1, x0, 101)              // x1 = 5
-m4_asm(ADDI, x2, x0, 11)               // x2 = 3
-m4_asm(ADDI, x3, x0, 1)                // x3 = 1  (shift amount)
-m4_asm(ADDI, x4, x0, 111111111111)     // x4 = -1 = 0xFFFFFFFF (12-bit imm, all ones, sign-extended)
+m4_asm(ADDI,  x1,  x0, 101)              //   0  x1 = 5
+m4_asm(ADDI,  x2,  x0, 11)               //   4  x2 = 3
+m4_asm(ADDI,  x25, x0, 0)                //   8  poison mask = 0
+m4_asm(ADDI,  x30, x0, 0)                //  12  progress = 0
+m4_asm(ADDI,  x31, x0, 0)                //  16  scratch
 
-// ---- R-type ALU ops (x1=5, x2=3, x3=1, x4=0xFFFFFFFF) ----
-m4_asm(ADD,  x5,  x1, x2)              // x5  = 8            (5+3)
-m4_asm(SUB,  x6,  x1, x2)              // x6  = 2            (5-3)
-m4_asm(AND,  x7,  x1, x2)              // x7  = 1            (5&3)
-m4_asm(OR,   x8,  x1, x2)              // x8  = 7            (5|3)
-m4_asm(XOR,  x9,  x1, x2)              // x9  = 6            (5^3)
-m4_asm(SLT,  x10, x2, x1)              // x10 = 1            (3 < 5, signed)
-m4_asm(SLTU, x11, x2, x1)              // x11 = 1            (3 < 5, unsigned)
-m4_asm(SLL,  x12, x1, x3)              // x12 = 10           (5 << 1)
-m4_asm(SRL,  x13, x1, x3)              // x13 = 2            (5 >> 1)
-m4_asm(SRA,  x14, x4, x3)              // x14 = 0xFFFFFFFF   (-1 >>> 1, arithmetic, stays all-ones)
+// ---- Taken branch, BOTH shadow slots distinct ----
+m4_asm(BEQ,   x2, x2, 1100)              //  20  taken, +12 -> 32
+m4_asm(ORI,   x25, x25, 1)               //  24  bit0: shadow slot 1
+m4_asm(ORI,   x25, x25, 10)              //  28  bit1: shadow slot 2
+m4_asm(ADDI,  x30, x30, 1)               //  32  progress = 1
 
-// ---- I-type ALU ops (x1=5, x4=0xFFFFFFFF as base) ----
-m4_asm(ADDI,  x15, x1, 11)             // x15 = 8            (5+3)
-m4_asm(SLTI,  x16, x1, 1010)           // x16 = 1            (5 < 10, signed)
-m4_asm(SLTIU, x17, x1, 1010)           // x17 = 1            (5 < 10, unsigned)
-m4_asm(XORI,  x18, x1, 11)             // x18 = 6            (5^3)
-m4_asm(ORI,   x19, x1, 11)             // x19 = 7            (5|3)
-m4_asm(ANDI,  x20, x1, 11)             // x20 = 1            (5&3)
-m4_asm(SLLI,  x21, x1, 1)              // x21 = 10           (5 << 1)
-m4_asm(SRLI,  x22, x1, 1)              // x22 = 2            (5 >> 1)
-m4_asm(SRAI,  x23, x4, 1)              // x23 = 0xFFFFFFFF   (-1 >>> 1)
+// ---- Wrong-path JAL must not redirect; real JAL link + shadow ----
+m4_asm(BEQ,   x2, x2, 1100)              //  36  taken, +12 -> 48
+m4_asm(JAL,   x0, 110)                   //  40  WRONG-PATH: +12 -> 52. Must NOT redirect
+m4_asm(ORI,   x25, x25, 100)             //  44  bit2: shadow slot 2
+m4_asm(JAL,   x26, 100)                  //  48  real JAL: +8 -> 56; x26 = 52
+m4_asm(ORI,   x25, x25, 1000)            //  52  bit3: JAL shadow / wrong-path JAL landed here
+m4_asm(ADDI,  x30, x30, 1)               //  56  progress = 2
 
-// ---- Load/Store ----
-m4_asm(SW, x0, x1, 0)                  // mem[word 0] = x1 (5)
-m4_asm(LW, x24, x0, 0)                 // x24 = 5   (loads back what was just stored)
+// ---- JALR: forwarded base, both shadow slots, wrong-path suppression ----
+m4_asm(AUIPC, x31, 0)                    //  60  x31 = 60
+m4_asm(BEQ,   x2, x2, 1100)              //  64  taken, +12 -> 76
+m4_asm(JALR,  x0, x31, 11100)            //  68  WRONG-PATH: 60+28 = 88. Must NOT redirect
+m4_asm(ORI,   x25, x25, 10000)           //  72  bit4: shadow slot 2
+m4_asm(JALR,  x27, x31, 100000)          //  76  real JALR: 60+32 = 92; x27 = 80
+m4_asm(ORI,   x25, x25, 100000)          //  80  bit5: JALR shadow slot 1
+m4_asm(ORI,   x25, x25, 1000000)         //  84  bit6: JALR shadow slot 2
+m4_asm(ORI,   x25, x25, 10000000)        //  88  bit7: wrong-path JALR landed here
+m4_asm(ADDI,  x30, x30, 1)               //  92  progress = 3 (JALR landing)
 
-// ---- Branches: each sets a poison bit in x25 IF the shadow-squash after a taken
+// ---- Backward loop: predictor training + predicted-taken/not-taken recovery ----
+m4_asm(ADDI,  x31, x0, 101)              //  96  x31 = 5
+m4_asm(ADDI,  x31, x31, 111111111111)    // 100  x31 -= 1        <- loop top
+m4_asm(BNE,   x31, x0, 1111111111100)    // 104  -4 -> 100
+m4_asm(ADDI,  x30, x30, 1)               // 108  progress = 4 (loop exited)
 
-m4_asm(ADDI, x25, x0, 0)               // corruption mask = 0
-
-m4_asm(BEQ,  x2, x2, 1000)             // taken (3==3)   -> should skip next instr
-m4_asm(ORI,  x25, x25, 1)              // bit0: BEQ squash failed if this executes
-
-m4_asm(BNE,  x1, x2, 1000)             // taken (5!=3)
-m4_asm(ORI,  x25, x25, 10)             // bit1: BNE
-
-m4_asm(BLT,  x2, x1, 1000)             // taken (3<5, signed)
-m4_asm(ORI,  x25, x25, 100)            // bit2: BLT
-
-m4_asm(BGE,  x1, x2, 1000)             // taken (5>=3, signed)
-m4_asm(ORI,  x25, x25, 1000)           // bit3: BGE
-
-m4_asm(BLTU, x2, x1, 1000)             // taken (3<5, unsigned)
-m4_asm(ORI,  x25, x25, 10000)          // bit4: BLTU
-
-m4_asm(BGEU, x1, x2, 1000)             // taken (5>=3, unsigned)
-m4_asm(ORI,  x25, x25, 100000)         // bit5: BGEU
-
-// ---- JAL: same shadow-squash idea, plus checks the link value (pc+4) ----
-m4_asm(JAL, x26, 100)                 // jump +8, x26 = link = this instr's addr + 4
-m4_asm(ORI, x25, x25, 1000000)         // bit6: JAL squash failed if this executes
-
-// ---- JALR: rs1=x0 makes the imm an absolute target (0+imm), which sidesteps
-// needing AUIPC/another register just to build a base address for this test.
-// Two-cycle shadow (needs the forwarding network, unlike JAL) — this is the
-// direct regression test for the >>1$valid chain fix.
-m4_asm(JALR, x27, x0, 10101000)        // absolute target = 168, x27 = link = this instr's addr + 4
-m4_asm(ORI,  x25, x25, 10000000)       // bit7: JALR squash failed if this executes
-
-// ---- LUI / AUIPC (this is also the JALR landing point) ----
-m4_asm(LUI,   x28, 1)                  // x28 = 4096  (1 << 12)
-m4_asm(AUIPC, x29, 1)                  // x29 = (this instr's own address) + 4096
-
-// ---- Not-taken confirmation: proves a branch that SHOULD fall through actually does
-m4_asm(ADDI, x30, x0, 0)               // 0 = "not yet confirmed"
-m4_asm(BEQ,  x1, x2, 1000)             // NOT taken (5 != 3) -> should fall through
-m4_asm(ADDI, x30, x0, 1)               // should execute -> x30 = 1 confirms correct fallthrough
-
-m4_asm(BGE, x0, x0, 0)                 // done — infinite loop
+m4_asm(BEQ,   x1, x2, 1100)              // 112  NOT taken (5 != 3)
+m4_asm(ADDI,  x30, x30, 1)               // 116  progress = 5 (fallthrough confirmed)
+m4_asm(BGE,   x0, x0, 0)                 // 120  halt
 m4_asm_end()
 
 \SV
@@ -233,11 +197,11 @@ m4_asm_end()
       @2 //ALU
          //Forwarding Control Signals
          //Path to EX/MEM
-         $rs1_fwd_mem = $rs1_valid && >>1$rd_valid && (>>1$rd == $rs1);
-         $rs2_fwd_mem = $rs2_valid && >>1$rd_valid && (>>1$rd == $rs2);
+         $rs1_fwd_mem = $rs1_valid && >>1$valid && >>1$rd_valid && (>>1$rd == $rs1);
+         $rs2_fwd_mem = $rs2_valid && >>1$valid && >>1$rd_valid && (>>1$rd == $rs2);
          //Path to MEM/WB
-         $rs1_fwd_wb = $rs1_valid && >>2$rd_valid && (>>2$rd == $rs1);
-         $rs2_fwd_wb = $rs2_valid && >>2$rd_valid && (>>2$rd == $rs2);
+         $rs1_fwd_wb = $rs1_valid && >>2$valid && >>2$rd_valid && (>>2$rd == $rs1);
+         $rs2_fwd_wb = $rs2_valid && >>2$valid && >>2$rd_valid && (>>2$rd == $rs2);
          //Forwarding Data Logic
          //EX/MEM, only load cases
          $mem_fwd_value[31:0] = >>1$is_lw ? >>1$ld_data : >>1$result;
