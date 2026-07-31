@@ -3,47 +3,24 @@
    // This code can be found in: https://github.com/stevehoover/LF-Building-a-RISC-V-CPU-Core/risc-v_shell.tlv
 
    m4_include_lib(['https://raw.githubusercontent.com/stevehoover/LF-Building-a-RISC-V-CPU-Core/main/lib/risc-v_shell_lib.tlv'])
-
-m4_asm(ADDI,  x1,  x0, 101)              //   0  x1 = 5
-m4_asm(ADDI,  x2,  x0, 11)               //   4  x2 = 3
-m4_asm(ADDI,  x25, x0, 0)                //   8  poison mask = 0
-m4_asm(ADDI,  x30, x0, 0)                //  12  progress = 0
-m4_asm(ADDI,  x31, x0, 0)                //  16  scratch
-
-// ---- Taken branch, BOTH shadow slots distinct ----
-m4_asm(BEQ,   x2, x2, 1100)              //  20  taken, +12 -> 32
-m4_asm(ORI,   x25, x25, 1)               //  24  bit0: shadow slot 1
-m4_asm(ORI,   x25, x25, 10)              //  28  bit1: shadow slot 2
-m4_asm(ADDI,  x30, x30, 1)               //  32  progress = 1
-
-// ---- Wrong-path JAL must not redirect; real JAL link + shadow ----
-m4_asm(BEQ,   x2, x2, 1100)              //  36  taken, +12 -> 48
-m4_asm(JAL,   x0, 110)                   //  40  WRONG-PATH: +12 -> 52. Must NOT redirect
-m4_asm(ORI,   x25, x25, 100)             //  44  bit2: shadow slot 2
-m4_asm(JAL,   x26, 100)                  //  48  real JAL: +8 -> 56; x26 = 52
-m4_asm(ORI,   x25, x25, 1000)            //  52  bit3: JAL shadow / wrong-path JAL landed here
-m4_asm(ADDI,  x30, x30, 1)               //  56  progress = 2
-
-// ---- JALR: forwarded base, both shadow slots, wrong-path suppression ----
-m4_asm(AUIPC, x31, 0)                    //  60  x31 = 60
-m4_asm(BEQ,   x2, x2, 1100)              //  64  taken, +12 -> 76
-m4_asm(JALR,  x0, x31, 11100)            //  68  WRONG-PATH: 60+28 = 88. Must NOT redirect
-m4_asm(ORI,   x25, x25, 10000)           //  72  bit4: shadow slot 2
-m4_asm(JALR,  x27, x31, 100000)          //  76  real JALR: 60+32 = 92; x27 = 80
-m4_asm(ORI,   x25, x25, 100000)          //  80  bit5: JALR shadow slot 1
-m4_asm(ORI,   x25, x25, 1000000)         //  84  bit6: JALR shadow slot 2
-m4_asm(ORI,   x25, x25, 10000000)        //  88  bit7: wrong-path JALR landed here
-m4_asm(ADDI,  x30, x30, 1)               //  92  progress = 3 (JALR landing)
-
-// ---- Backward loop: predictor training + predicted-taken/not-taken recovery ----
-m4_asm(ADDI,  x31, x0, 101)              //  96  x31 = 5
-m4_asm(ADDI,  x31, x31, 111111111111)    // 100  x31 -= 1        <- loop top
-m4_asm(BNE,   x31, x0, 1111111111100)    // 104  -4 -> 100
-m4_asm(ADDI,  x30, x30, 1)               // 108  progress = 4 (loop exited)
-
-m4_asm(BEQ,   x1, x2, 1100)              // 112  NOT taken (5 != 3)
-m4_asm(ADDI,  x30, x30, 1)               // 116  progress = 5 (fallthrough confirmed)
-m4_asm(BGE,   x0, x0, 0)                 // 120  halt
+m4_define(['m4_asm_ECALL'],  ['32'b00000000000000000000000001110011'])
+m4_define(['m4_asm_EBREAK'], ['32'b00000000000100000000000001110011'])
+m4_define(['m4_asm_MRET'],   ['32'b00110000001000000000000001110011'])
+m4_asm(AUIPC, x1, 0)                    //  0  x1 = 0
+m4_asm(ADDI,  x1, x1, 100000)           //  4  x1 = 32 (handler)
+m4_asm(CSRRW, x0, x1, 1100000101)       //  8  mtvec = 32
+m4_asm(ADDI,  x30, x0, 1)               // 12  x30 = 1
+m4_asm(ECALL)                           // 16  mepc = 16, mcause = 11
+m4_asm(ADDI,  x30, x30, 100)            // 20  +4  - return target, runs ONCE
+m4_asm(ADDI,  x30, x30, 1000)           // 24  +8  - runs after the return
+m4_asm(BGE, x0, x0, 0)                  // 28  halt
+m4_asm(CSRRS, x6, x0, 1101000010)       // 32  handler: x6 = 11
+m4_asm(CSRRS, x7, x0, 1101000001)       // 36  x7 = 16
+m4_asm(ADDI,  x8, x7, 100)              // 40  x8 = 20 (mepc + 4)
+m4_asm(CSRRW, x0, x8, 1101000001)       // 44  mepc = 20
+m4_asm(MRET)                            // 48  -> 20
+m4_asm(ADDI,  x30, x30, 10000)          // 52  +16 - MRET shadow 1
+m4_asm(ADDI,  x30, x30, 100000)         // 56  +32 - MRET shadow 2
 m4_asm_end()
 
 \SV
@@ -60,9 +37,11 @@ m4_asm_end()
 
          $pc[31:0] = >>1$next_pc;
          $next_pc[31:0] = $reset ? 32'b0:
-                          >>2$valid_mispredicted ? (>>2$taken_br ? >>2$br_target_pc : >>2$pc + 32'b100) :
-                          >>1$valid_jal ? >>1$br_target_pc: //resolves in ID
-                          >>2$valid_jalr ? >>2$jalr_target_pc: //resolves in EX
+                          >>2$valid_trap ? >>2$trap_target_pc:
+                          >>2$valid_mispredicted ? (>>2$taken_br ? >>2$br_target_pc : >>2$pc + 32'b100) : //if branch prediction was wrong
+                          >>1$valid_jal ? >>1$br_target_pc: // JAL resolves in ID
+                          >>2$valid_jalr ? >>2$jalr_target_pc: // JALR resolves in EX
+                          >>2$valid_mret ? >>2$mret_target_pc:
                           $pred_taken_f ? $br_predicted_pc_f:
                           $pc + 32'b100;
 
@@ -73,12 +52,24 @@ m4_asm_end()
 
          //exception handling signals
          $trap = $illegal_instr || $is_ecall || $is_ebreak;
-         $valid = !$reset && !$trap
-                  && !>>1$valid_jal
-                  && !>>1$valid_jalr && !>>2$valid_jalr
-                  && !>>1$valid_mispredicted && !>>2$valid_mispredicted;
+         $trap_cause[31:0] = $is_ecall ? 32'd11:
+                             $is_ebreak ? 32'd3:
+                             32'd2;
+         $on_path = !$reset //checks instructions that could remove instruction from path
+                    && >>1$valid_jal
+                    && >>1$valid_jalr && !>>2$valid_jalr
+                    && >>1$valid_mret && >>2$valid_mret
+                    && >>1$valid_trap && >>2$valid_trap
+                    && >>1$valid_mispredicted && >>2$valid_mispredicted;
+         $valid = !$on_path && !$trap;
+         $valid_trap = $on_path && $trap;
          $valid_jal  = $valid && $is_jal;
          $valid_jalr = $valid && $is_jalr;
+         $valid_mret = $valid && $is_mret;
+         $illegal_instr = ($is_csr && !$csr_addr_valid)
+                          || ($csr_wr_req && $csr_addr[11:10] == 2'b11) //writing to a read only csr section
+                          || ($is_system && !$is_csr && !$is_ecall && !$is_ebreak && !$is_mret) //unauthorized system instruction
+                          || !($is_lui || $is_auipc || $is_jal ||$is_jalr || $is_branch || $is_load || $is_store || $is_opimm || $is_op || $is_fence || $is_system);
 
          //branch history table and branch target buffer
          /bht[31:0]
@@ -101,24 +92,40 @@ m4_asm_end()
          $rd[4:0] = $instr[11:7];
          $opcode[6:0] = $instr[6:0];
          // opcodes
-         $is_lui    = $opcode == 7'b0110111;
-         $is_auipc  = $opcode == 7'b0010111;
-         $is_jal    = $opcode == 7'b1101111;
-         $is_jalr   = $opcode == 7'b1100111;
-         $is_branch = $opcode == 7'b1100011;
-         $is_load   = $opcode == 7'b0000011;
-         $is_store  = $opcode == 7'b0100011;
-         $is_opimm  = $opcode == 7'b0010011;
-         $is_op     = $opcode == 7'b0110011;
-         $is_fence  = $opcode == 7'b0001111;
-         $is_system = $opcode == 7'b1110011;
-         //instruction formats
+         $is_lui    = $opcode ==? 7'b0110111;
+         $is_auipc  = $opcode ==? 7'b0010111;
+         $is_jal    = $opcode ==? 7'b1101111;
+         $is_jalr   = $opcode ==? 7'b1100111;
+         $is_branch = $opcode ==? 7'b1100011;
+         $is_load   = $opcode ==? 7'b0000011;
+         $is_store  = $opcode ==? 7'b0100011;
+         $is_opimm  = $opcode ==? 7'b0010011;
+         $is_op     = $opcode ==? 7'b0110011;
+         $is_fence  = $opcode ==? 7'b0001111;
+         $is_system = $opcode ==? 7'b1110011;
+         //zicsr instruction decode
+         $is_csrrw = $is_system && ($funct3 == 3'b001);
+         $is_csrrs = $is_system && ($funct3 == 3'b010);
+         $is_csrrc = $is_system && ($funct3 == 3'b011);
+         $is_csrrwi = $is_system && ($funct3 == 3'b101);
+         $is_csrrsi = $is_system && ($funct3 == 3'b110);
+         $is_csrrci = $is_system && ($funct3 == 3'b111);
+         $is_mret = $is_system && ($funct3 == 3'b000) && ($instr[31:20] == 12'h302);
+         $csr_addr[11:0] = $instr[31:20]; //unsigned as opposed to imm
+         $csr_uimm[31:0] = {27'b0, $instr[19:15]};
+           //write suppression (no valid needed, valid depends on trap depends on illegal_instr
+         $csr_src_zero = $is_csr_imm ? ($instr[19:15] == 5'b0) : ($rs1 == 5'b0);
+         $csr_wr_req = $is_csr && !(($is_csrrs || $is_csrrc || $is_csrrsi || $is_csrrci) && $csr_src_zero);
+         $csr_addr_valid = ($csr_addr == 12'h340) || ($csr_addr == 12'hB00) || ($csr_addr == 12'hC00) || ($csr_addr == 12'hB02) || ($csr_addr == 12'hC02);
+         //instruction formats, used mainly for gating validity
          $is_i_instr = $is_load || $is_opimm || $is_jalr;
          $is_s_instr = $is_store;
          $is_b_instr = $is_branch;
          $is_u_instr = $is_lui || $is_auipc;
          $is_j_instr = $is_jal;
          $is_r_instr = $is_op;
+         $is_csr_imm = $is_csrrwi || $is_csrrsi || $is_csrrci;
+         $is_csr = $is_csrrw || $is_csrrs || $is_csrrc || $is_csr_imm;
          //immediate
          $imm[31:0] = $is_i_instr ? { {21{$instr[31]}}, $instr[30:20]}:
                       $is_s_instr ? { {21{$instr[31]}}, $instr[30:25], $instr[11:7]}:
@@ -128,17 +135,12 @@ m4_asm_end()
                       32'b0;
          // valid fields
          $funct3_valid = $is_r_instr || $is_i_instr || $is_s_instr || $is_b_instr;
-         $rs1_valid = $is_r_instr || $is_i_instr || $is_s_instr || $is_b_instr;
+         $rs1_valid = $is_r_instr || $is_i_instr || $is_s_instr || $is_b_instr || ($is_csr && !$is_csr_imm);
          $rs2_valid = $is_r_instr || $is_s_instr || $is_b_instr;
-         $rd_valid = ($is_r_instr || $is_i_instr || $is_u_instr || $is_j_instr) && $rd != 5'b0;
+         $rd_valid = ($is_r_instr || $is_i_instr || $is_u_instr || $is_j_instr || $is_csr) && $rd != 5'b0;
          // SYSTEM sub-decode
          $is_ecall  = $is_system && ($funct3 == 3'b000) && ($instr[31:20] == 12'b0);
          $is_ebreak = $is_system && ($funct3 == 3'b000) && ($instr[31:20] == 12'b1);
-         //illegal instruction signal
-         $illegal_instr = !($is_lui || $is_auipc || $is_jal || $is_jalr || $is_branch
-                    || $is_load || $is_store || $is_opimm || $is_op
-                    || $is_fence || $is_system);
-
          //branch target address
          $br_target_pc[31:0] = $pc + $imm;
 
@@ -196,16 +198,16 @@ m4_asm_end()
 
       @2 //ALU
          //Forwarding Control Signals
-         //Path to EX/MEM
+           //Path to EX/MEM
          $rs1_fwd_mem = $rs1_valid && >>1$valid && >>1$rd_valid && (>>1$rd == $rs1);
          $rs2_fwd_mem = $rs2_valid && >>1$valid && >>1$rd_valid && (>>1$rd == $rs2);
-         //Path to MEM/WB
+           //Path to MEM/WB
          $rs1_fwd_wb = $rs1_valid && >>2$valid && >>2$rd_valid && (>>2$rd == $rs1);
          $rs2_fwd_wb = $rs2_valid && >>2$valid && >>2$rd_valid && (>>2$rd == $rs2);
          //Forwarding Data Logic
-         //EX/MEM, only load cases
+           //EX/MEM, only load cases
          $mem_fwd_value[31:0] = >>1$is_lw ? >>1$ld_data : >>1$result;
-         //MEM/WB rf_wr_data already gated by load condition
+           //MEM/WB rf_wr_data already gated by load condition
          $wb_fwd_value[31:0] = >>2$rf_wr_data;
          //Control Logic
          $src1_value_fwd[31:0] = $rs1_fwd_mem ? $mem_fwd_value:
@@ -214,6 +216,46 @@ m4_asm_end()
          $src2_value_fwd[31:0] = $rs2_fwd_mem ? $mem_fwd_value:
                            $rs2_fwd_wb ? $wb_fwd_value:
                            $src2_value;
+         //CSR signals
+           //previous cycle values to reference
+         $mscratch_old[31:0] = >>1$mscratch;
+         $mcycle_old[31:0] = >>1$mcycle;
+         $minstret_old[31:0] = >>1$minstret;
+         $mtvec_old[31:0] = >>1$mtvec;
+         $mepc_old[31:0] = >>1$mepc;
+         $mcause_old[31:0] = >>1$mcause;
+         $trap_target_pc[31:0] = {$mtvec_old[31:2], 2'b0};
+         $mret_target_pc[31:0] = $mepc_old;
+           //read-mod-write muxes
+         $csr_read_data[31:0] = ($csr_addr == 12'h340) ? $mscratch_old:
+                                ($csr_addr == 12'hB00 || $csr_addr == 12'hC00) ? $mcycle_old:
+                                ($csr_addr == 12'hB02 || $csr_addr == 12'hC02) ? $minstret_old:
+                                32'b0; //more CSRs go here
+         $csr_src[31:0] = $is_csr_imm ? $csr_uimm : $src1_value_fwd;
+         $csr_new_value[31:0] = ($is_csrrw || $is_csrrwi) ? $csr_src:
+                              ($is_csrrs || $is_csrrsi) ? $csr_read_data | $csr_src:
+                              ($is_csrrc || $is_csrrci) ? $csr_read_data & ~$csr_src:
+                              32'b0;
+         $csr_wr_en = $csr_wr_req && $valid;
+           //next state muxes
+
+         $mscratch[31:0] = $reset ? 32'b0:  //plain storage: hold unless written
+                           ($csr_wr_en && $csr_addr == 12'h340) ? $csr_new_value : $mscratch_old;
+         $mcycle[31:0] = $reset ? 32'b0:    //background update, counts unless there is an explicit write
+                         ($csr_wr_en && $csr_addr == 12'hB00) ? $csr_new_value : ($mcycle_old + 32'b1);
+         $minstret[31:0] = $reset ? 32'b0:  //counts retirements not cycles, only adds one if valid and not explicit write
+                           ($csr_wr_en && $csr_addr == 12'hB02) ? $csr_new_value: $minstret_old + {31'b0, $valid};
+         $mtvec[31:0] = $reset ? 32'b0:
+                        ($csr_wr_en && ($csr_addr == 12'h305)) ? $csr_new_value:
+                        $mtvec_old;
+         $mepc[31:0] = $reset ? 32'b0:
+                       $valid_trap ? $pc:
+                       ($csr_wr_en && ($csr_addr == 12'h341)) ? $csr_new_value:
+                       $mepc_old;
+         $mcause[31:0] = $reset ? 32'b0:
+                         $valid_trap ? $trap_cause:
+                         ($csr_wr_en && ($csr_addr == 12'h342)) ? $csr_new_value:
+                         $mcause_old;
 
          //Branch Logic
          $src2_or_imm_fwd[31:0] = $is_r_instr ? $src2_value_fwd : $imm;
@@ -241,6 +283,7 @@ m4_asm_end()
                          $is_lui ? $imm:
                          $is_auipc ? $pc + $imm:
                          ($is_jal || $is_jalr) ? ($pc + 32'b100):
+                         $is_csr ? $csr_read_data:
                          32'b0;
          $addr[31:0] = $src1_value_fwd + $imm;
          $jalr_target_pc[31:0] =  ($src1_value_fwd + $imm) & ~32'b1;
