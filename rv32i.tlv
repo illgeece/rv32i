@@ -2,26 +2,50 @@
 \SV
    // This code can be found in: https://github.com/stevehoover/LF-Building-a-RISC-V-CPU-Core/risc-v_shell.tlv
 
-   m4_include_lib(['https://raw.githubusercontent.com/stevehoover/LF-Building-a-RISC-V-CPU-Core/main/lib/risc-v_shell_lib.tlv'])
+m4_include_lib(['https://raw.githubusercontent.com/stevehoover/LF-Building-a-RISC-V-CPU-Core/main/lib/risc-v_shell_lib.tlv'])
 m4_define(['m4_asm_ECALL'],  ['32'b00000000000000000000000001110011'])
 m4_define(['m4_asm_EBREAK'], ['32'b00000000000100000000000001110011'])
 m4_define(['m4_asm_MRET'],   ['32'b00110000001000000000000001110011'])
-m4_asm(ADDI,  x1, x0, 100000)                //  0  x1 = 32 (handler address)
-m4_asm(CSRRW, x0, x1, 1100000101)            //  4  mtvec = 32
-m4_asm(ADDI,  x2, x0, 1000)                  //  8  x2 = 8 (MIE bit)
-m4_asm(CSRRW, x0, x2, 1100000000)            // 12  mstatus = 8 -> MIE=1; MPP write ignored (stays M)
-m4_asm(CSRRS, x3, x0, 1100000000)            // 16  x3 = mstatus BEFORE trap
-m4_asm(ECALL)                                // 20  trap: mepc=20, mcause=11
-m4_asm(CSRRS, x9, x0, 1100000000)            // 24  RETURN POINT: x9 = mstatus AFTER mret
-m4_asm(BGE,   x0, x0, 0)                     // 28  halt
-m4_asm(CSRRS, x4, x0, 1100000000)            // 32  handler: x4 = mstatus IN handler
-m4_asm(CSRRS, x5, x0, 1101000001)            // 36  x5 = mepc
-m4_asm(CSRRS, x6, x0, 1101000010)            // 40  x6 = mcause
-m4_asm(ADDI,  x5, x5, 100)                   // 44  x5 = mepc + 4 = 24 (skip the ECALL on return)
-m4_asm(CSRRW, x0, x5, 1101000001)            // 48  mepc = 24
-m4_asm(MRET)                                 // 52  -> PC=24, MIE<=MPIE, MPIE<=1
-m4_asm(ADDI,  x30, x0, 1111100111)           // 56  poison (999): must NEVER execute
-m4_asm(BGE,   x0, x0, 0)                     // 60  handler halt (unreachable)
+m4_asm(ADDI,  x1,  x0,  1001000)             //   0  x1 = 72 (handler address)
+m4_asm(CSRRW, x0,  x1,  1100000101)          //   4  mtvec = 72
+m4_asm(ADDI,  x2,  x0,  11111111111)         //   8  x2 = 2047 (junk payload for CSR writes)
+m4_asm(ADDI,  x11, x0,  1000101011)          //  12  x11 = 555 (canary)
+m4_asm(ADDI,  x12, x0,  1000101011)          //  16  x12 = 555 (canary)
+m4_asm(ADDI,  x13, x0,  0)                   //  20  x13 = 0 -- a NON-x0 register that HOLDS zero
+
+   // ---- A: reads of the read-only ID CSRs must not trap ----
+m4_asm(CSRRS, x3,  x0,  111100010001)        //  24  x3 = mvendorid (0xF11)
+m4_asm(CSRRS, x4,  x0,  111100010010)        //  28  x4 = marchid   (0xF12)
+m4_asm(CSRRS, x5,  x0,  111100010011)        //  32  x5 = mimpid    (0xF13)
+m4_asm(CSRRS, x6,  x0,  111100010100)        //  36  x6 = mhartid   (0xF14)
+m4_asm(CSRRS, x7,  x0,  1100000001)          //  40  x7 = misa      (0x301)
+
+   // ---- B: misa is WARL read-WRITE -- write is accepted, dropped, and must NOT trap ----
+m4_asm(CSRRW, x9,  x2,  1100000001)          //  44  x9 = OLD misa; writes 2047, which must be discarded
+m4_asm(CSRRS, x8,  x0,  1100000001)          //  48  x8 = misa, must be unchanged
+
+   // ---- C: write to a read-only CSR must trap ----
+m4_asm(CSRRW, x11, x2,  111100010001)        //  52  TRAP (cause 2); x11 must keep its canary
+
+   // ---- D: rs1 holds zero but is not x0, so this IS a write -- must still trap ----
+m4_asm(CSRRS, x12, x13, 111100010100)        //  56  TRAP (cause 2); x12 must keep its canary
+
+   // ---- D': rs1 IS x0, so the write is suppressed and the read-only access is legal ----
+m4_asm(CSRRS, x10, x0,  111100010001)        //  60  x10 = mvendorid, NO trap
+
+m4_asm(ADDI,  x14, x0,  101010)              //  64  x14 = 42, sentinel: main path ran to completion
+m4_asm(BGE,   x0,  x0,  0)                   //  68  halt
+
+   // ---- shared handler: accumulate cause, count traps, skip the faulting instruction ----
+m4_asm(CSRRS, x22, x0,  1101000010)          //  72  handler: x22 = mcause
+m4_asm(ADD,   x20, x20, x22)                 //  76  x20 += mcause
+m4_asm(ADDI,  x21, x21, 1)                   //  80  x21 += 1 (trap counter)
+m4_asm(CSRRS, x23, x0,  1101000001)          //  84  x23 = mepc
+m4_asm(ADDI,  x23, x23, 100)                 //  88  x23 = mepc + 4
+m4_asm(CSRRW, x0,  x23, 1101000001)          //  92  mepc = mepc + 4
+m4_asm(MRET)                                 //  96  -> PC = mepc
+m4_asm(ADDI,  x30, x0,  1111100111)          // 100  poison (999): must NEVER execute
+m4_asm(BGE,   x0,  x0,  0)                   // 104  handler halt (unreachable)
 m4_asm_end()
 
 
@@ -269,12 +293,12 @@ m4_asm_end()
          $mstatus_mie_old = >>1$mstatus_mie;
            //mstatus_value for an M mode only processor only has 2 variable flops
          $mstatus_value[31:0] = {19'b0, 2'b11, 3'b0, $mstatus_mpie_old, 3'b0, $mstatus_mie_old, 3'b0};
-         $trap_target_pc[31:0] = {$mtvec_old[31:2], 2'b0};
+         $trap_target_pc[31:0] = $mtvec_old;
          $mret_target_pc[31:0] = $mepc_old;
            //misa register fields, editable for future extension
          $misa_mxl[1:0] = 2'b01; //rv32
-         $misa_extensions[24:0] = 25'h100; //I mode
-         $misa_val[31:0] = {$misa_mxl, 5'b0, $misa_extensions};
+         $misa_extensions[25:0] = 26'h100; //I mode
+         $misa_val[31:0] = {$misa_mxl, 4'b0, $misa_extensions};
            //read-mod-write muxes
          $csr_read_data[31:0] = ($csr_addr == 12'h300) ? $mstatus_value:
                                 ($csr_addr == 12'h340) ? $mscratch_old:
@@ -300,21 +324,22 @@ m4_asm_end()
          $minstret[31:0] = $reset ? 32'b0:  //counts retirements not cycles, only adds one if valid and not explicit write
                            ($csr_wr_en && $csr_addr == 12'hB02) ? $csr_new_value: $minstret_old + {31'b0, $valid && !$valid_misaligned_id && !$valid_misaligned_ex};
          $mtvec[31:0] = $reset ? 32'b0:
-                        ($csr_wr_en && ($csr_addr == 12'h305)) ? $csr_new_value:
+                        ($csr_wr_en && ($csr_addr == 12'h305)) ? {$csr_new_value[31:2], 2'b00}: //mask to set MODE to direct
                         $mtvec_old;
          $mepc[31:0] = $reset ? 32'b0:
                        $take_trap ? $pc:
-                       ($csr_wr_en && ($csr_addr == 12'h341)) ? {$csr_new_value[31:2], 2'b0}: //masks low bits to align
+                       ($csr_wr_en && ($csr_addr == 12'h341)) ? {$csr_new_value[31:2], 2'b00}: //masks low bits to align, will change with C extension
                        $mepc_old;
-         $mcause[31:0] = $reset ? 32'b0:
+         $mcause[31:0] = $reset ? 32'b0: //32b sig to match RISCOF test result over spec matching
                          $valid_trap ? $trap_cause:
                          ($valid_misaligned_id || $valid_misaligned_ex) ? 32'b0:
                          ($csr_wr_en && ($csr_addr == 12'h342)) ? $csr_new_value:
                          $mcause_old;
          $mtval[31:0] = $reset ? 32'b0:
-                        $valid_misaligned_id || ($valid_misaligned_ex && $taken_br) ? $br_target_pc:
-                        $valid_misaligned_ex && $is_jalr ? $jalr_target_pc:
-                        $csr_wr_en && ($csr_addr == 12'h343) ? $csr_new_value:
+                        $valid_trap ? 32'b0:
+                        $valid_misaligned_id ? $br_target_pc: //mutually exclusive w valid_trap
+                        $valid_misaligned_ex ? ($is_jalr ? $jalr_target_pc : $br_target_pc):
+                        $csr_wr_en && ($csr_addr == 12'h343) ? $csr_new_value: //mutually exclusive w above
                         $mtval_old;
          $mstatus_mie = $reset ? 1'b0: //interrupts currently enabled
                         $take_trap ? 1'b0:
