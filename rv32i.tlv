@@ -6,22 +6,26 @@
 m4_define(['m4_asm_ECALL'],  ['32'b00000000000000000000000001110011'])
 m4_define(['m4_asm_EBREAK'], ['32'b00000000000100000000000001110011'])
 m4_define(['m4_asm_MRET'],   ['32'b00110000001000000000000001110011'])
-m4_asm(AUIPC, x1, 0)                    //  0  x1 = 0
-m4_asm(ADDI,  x1, x1, 100000)           //  4  x1 = 32 (handler)
-m4_asm(CSRRW, x0, x1, 1100000101)       //  8  mtvec = 32
-m4_asm(ADDI,  x30, x0, 1)               // 12  x30 = 1
-m4_asm(ECALL)                           // 16  mepc = 16, mcause = 11
-m4_asm(ADDI,  x30, x30, 100)            // 20  +4  - return target, runs ONCE
-m4_asm(ADDI,  x30, x30, 1000)           // 24  +8  - runs after the return
-m4_asm(BGE, x0, x0, 0)                  // 28  halt
-m4_asm(CSRRS, x6, x0, 1101000010)       // 32  handler: x6 = 11
-m4_asm(CSRRS, x7, x0, 1101000001)       // 36  x7 = 16
-m4_asm(ADDI,  x8, x7, 100)              // 40  x8 = 20 (mepc + 4)
-m4_asm(CSRRW, x0, x8, 1101000001)       // 44  mepc = 20
-m4_asm(MRET)                            // 48  -> 20
-m4_asm(ADDI,  x30, x30, 10000)          // 52  +16 - MRET shadow 1
-m4_asm(ADDI,  x30, x30, 100000)         // 56  +32 - MRET shadow 2
+m4_asm(ADDI,  x1, x0, 100000)                //  0  x1 = 32 (handler address)
+m4_asm(CSRRW, x0, x1, 1100000101)            //  4  mtvec = 32
+m4_asm(ADDI,  x2, x0, 1000)                  //  8  x2 = 8 (MIE bit)
+m4_asm(CSRRW, x0, x2, 1100000000)            // 12  mstatus = 8 -> MIE=1; MPP write ignored (stays M)
+m4_asm(CSRRS, x3, x0, 1100000000)            // 16  x3 = mstatus BEFORE trap
+m4_asm(ECALL)                                // 20  trap: mepc=20, mcause=11
+m4_asm(CSRRS, x9, x0, 1100000000)            // 24  RETURN POINT: x9 = mstatus AFTER mret
+m4_asm(BGE,   x0, x0, 0)                     // 28  halt
+m4_asm(CSRRS, x4, x0, 1100000000)            // 32  handler: x4 = mstatus IN handler
+m4_asm(CSRRS, x5, x0, 1101000001)            // 36  x5 = mepc
+m4_asm(CSRRS, x6, x0, 1101000010)            // 40  x6 = mcause
+m4_asm(ADDI,  x5, x5, 100)                   // 44  x5 = mepc + 4 = 24 (skip the ECALL on return)
+m4_asm(CSRRW, x0, x5, 1101000001)            // 48  mepc = 24
+m4_asm(MRET)                                 // 52  -> PC=24, MIE<=MPIE, MPIE<=1
+m4_asm(ADDI,  x30, x0, 1111100111)           // 56  poison (999): must NEVER execute
+m4_asm(BGE,   x0, x0, 0)                     // 60  handler halt (unreachable)
 m4_asm_end()
+
+
+
 
 \SV
    m4_makerchip_module   // (Expanded in Nav-TLV pane.)
@@ -32,12 +36,13 @@ m4_asm_end()
          $reset = *reset;
          // PC Logic
          $bht_index_f[4:0] = $pc[6:2];
-         $pred_taken_f = /bht[$bht_index_f]>>1$ctr[1];
+         $btb_hit_f = /btb[$bht_index_f]>>1$valid && (/btb[$bht_index_f]>>1$tag == $pc[31:7]);
+         $pred_taken_f = $btb_hit_f && /bht[$bht_index_f]>>1$ctr[1];
          $br_predicted_pc_f[31:0] = /btb[$bht_index_f]>>1$value;
 
          $pc[31:0] = >>1$next_pc;
          $next_pc[31:0] = $reset ? 32'b0:
-                          >>2$valid_trap ? >>2$trap_target_pc:
+                          >>2$take_trap ? >>2$trap_target_pc:
                           >>2$valid_mispredicted ? (>>2$taken_br ? >>2$br_target_pc : >>2$pc + 32'b100) : //if branch prediction was wrong
                           >>1$valid_jal ? >>1$br_target_pc: // JAL resolves in ID
                           >>2$valid_jalr ? >>2$jalr_target_pc: // JALR resolves in EX
@@ -56,42 +61,62 @@ m4_asm_end()
                              $is_ebreak ? 32'd3:
                              32'd2;
          $on_path = !$reset //checks instructions that could remove instruction from path
-                    && >>1$valid_jal
-                    && >>1$valid_jalr && !>>2$valid_jalr
-                    && >>1$valid_mret && >>2$valid_mret
-                    && >>1$valid_trap && >>2$valid_trap
-                    && >>1$valid_mispredicted && >>2$valid_mispredicted;
-         $valid = !$on_path && !$trap;
+                    && !>>1$valid_jal
+                    && !>>1$valid_jalr && !>>2$valid_jalr
+                    && !>>1$valid_mret && !>>2$valid_mret
+                    && !>>1$valid_trap && !>>2$valid_trap
+                    && !>>1$valid_mispredicted && !>>2$valid_mispredicted
+                    && !>>1$valid_misaligned_id && !>>2$valid_misaligned_id
+                    && !>>1$valid_misaligned_ex && !>>2$valid_misaligned_ex;
+         $valid = $on_path && !$trap;
          $valid_trap = $on_path && $trap;
          $valid_jal  = $valid && $is_jal;
          $valid_jalr = $valid && $is_jalr;
          $valid_mret = $valid && $is_mret;
+         $valid_misaligned_id = $valid && $misaligned_id;
+         $misaligned_id = $is_jal && ($br_target_pc[1:0] != 2'b00);
+         $decode_valid = $is_lui || $is_auipc || $is_jal // instruction check catch all, compares funct7 and opcodes
+                         || ($is_jalr && $funct3 == 3'b000)
+                         || ($is_fence && $funct3 == 3'b000)
+                         || $is_system || $is_beq || $is_bne || $is_blt || $is_bge || $is_bltu || $is_bgeu
+                         || $is_lw || $is_lh || $is_lhu || $is_lb || $is_lbu
+                         || $is_sw || $is_sh || $is_sb
+                         || $is_addi || $is_slti || $is_sltiu || $is_xori || $is_ori || $is_andi
+                         || (($is_slli || $is_srli || $is_srai) && $funct7_valid)
+                         || (($is_add || $is_sub || $is_sll || $is_slt || $is_sltu || $is_xor || $is_srl || $is_sra || $is_or || $is_and) && $funct7_valid);
          $illegal_instr = ($is_csr && !$csr_addr_valid)
                           || ($csr_wr_req && $csr_addr[11:10] == 2'b11) //writing to a read only csr section
                           || ($is_system && !$is_csr && !$is_ecall && !$is_ebreak && !$is_mret) //unauthorized system instruction
-                          || !($is_lui || $is_auipc || $is_jal ||$is_jalr || $is_branch || $is_load || $is_store || $is_opimm || $is_op || $is_fence || $is_system);
+                          || !$decode_valid;
 
          //branch history table and branch target buffer
          /bht[31:0]
             $my_update = |cpu>>1$valid && |cpu>>1$is_b_instr && (|cpu>>1$bht_index_f == #bht);
             $ctr[1:0] = |cpu$reset ? 2'b01:
-                        $my_update ? (|cpu>>1$taken_br ? ($ctr == 2'b11 ? 2'b11 : $ctr + 2'b01):
-                                                         ($ctr == 2'b00 ? 2'b00 : $ctr - 2'b01)):
+                        $my_update ? (|cpu>>1$taken_br ? (>>1$ctr == 2'b11 ? 2'b11 : >>1$ctr + 2'b01):
+                                                         (>>1$ctr == 2'b00 ? 2'b00 : >>1$ctr - 2'b01)):
                         $RETAIN;
          /btb[31:0]
             $my_update = |cpu>>1$valid && |cpu>>1$taken_br && (|cpu>>1$bht_index_f == #btb);
+            $tag[24:0] = |cpu$reset ? 25'b0:
+                         $my_update ? |cpu>>1$pc[31:7]:
+                         $RETAIN;
+            $valid = |cpu$reset ? 1'b0:
+                     $my_update ? 1'b1:
+                     $RETAIN;
             $value[31:0] = |cpu$reset ? 32'b0:
                            $my_update ? |cpu>>1$br_target_pc:
                            $RETAIN;
 
          //Decoding logic
          //splitting up instruction signal
+         $funct7[6:0] = $instr[31:25];
          $funct3[2:0] = $instr[14:12];
          $rs1[4:0] = $instr[19:15];
          $rs2[4:0] = $instr[24:20];
          $rd[4:0] = $instr[11:7];
          $opcode[6:0] = $instr[6:0];
-         // opcodes
+         // opcode only decodes
          $is_lui    = $opcode ==? 7'b0110111;
          $is_auipc  = $opcode ==? 7'b0010111;
          $is_jal    = $opcode ==? 7'b1101111;
@@ -110,13 +135,18 @@ m4_asm_end()
          $is_csrrwi = $is_system && ($funct3 == 3'b101);
          $is_csrrsi = $is_system && ($funct3 == 3'b110);
          $is_csrrci = $is_system && ($funct3 == 3'b111);
-         $is_mret = $is_system && ($funct3 == 3'b000) && ($instr[31:20] == 12'h302);
          $csr_addr[11:0] = $instr[31:20]; //unsigned as opposed to imm
          $csr_uimm[31:0] = {27'b0, $instr[19:15]};
            //write suppression (no valid needed, valid depends on trap depends on illegal_instr
          $csr_src_zero = $is_csr_imm ? ($instr[19:15] == 5'b0) : ($rs1 == 5'b0);
          $csr_wr_req = $is_csr && !(($is_csrrs || $is_csrrc || $is_csrrsi || $is_csrrci) && $csr_src_zero);
-         $csr_addr_valid = ($csr_addr == 12'h340) || ($csr_addr == 12'hB00) || ($csr_addr == 12'hC00) || ($csr_addr == 12'hB02) || ($csr_addr == 12'hC02);
+         $csr_addr_valid = ($csr_addr == 12'h340) || ($csr_addr == 12'h305)
+                           || ($csr_addr == 12'h341) || ($csr_addr == 12'h342)
+                           || ($csr_addr == 12'hB00) || ($csr_addr == 12'hB02)
+                           || ($csr_addr == 12'h343) || ($csr_addr == 12'h300)
+                           || ($csr_addr == 12'h310) || ($csr_addr == 12'h301)
+                           || ($csr_addr == 12'hF11) || ($csr_addr == 12'hF12)
+                           || ($csr_addr == 12'hF13) || ($csr_addr == 12'hF14);
          //instruction formats, used mainly for gating validity
          $is_i_instr = $is_load || $is_opimm || $is_jalr;
          $is_s_instr = $is_store;
@@ -126,7 +156,7 @@ m4_asm_end()
          $is_r_instr = $is_op;
          $is_csr_imm = $is_csrrwi || $is_csrrsi || $is_csrrci;
          $is_csr = $is_csrrw || $is_csrrs || $is_csrrc || $is_csr_imm;
-         //immediate
+         //immediate mux
          $imm[31:0] = $is_i_instr ? { {21{$instr[31]}}, $instr[30:20]}:
                       $is_s_instr ? { {21{$instr[31]}}, $instr[30:25], $instr[11:7]}:
                       $is_b_instr ? { {20{$instr[31]}}, $instr[7], $instr[30:25], $instr[11:8], 1'b0}:
@@ -134,13 +164,15 @@ m4_asm_end()
                       $is_j_instr ? { {12{$instr[31]}}, $instr[19:12], $instr[20], $instr[30:21], 1'b0}:
                       32'b0;
          // valid fields
+         $funct7_valid = ($funct7 == 7'b0) || ($funct7 == 7'b0100000);
          $funct3_valid = $is_r_instr || $is_i_instr || $is_s_instr || $is_b_instr;
          $rs1_valid = $is_r_instr || $is_i_instr || $is_s_instr || $is_b_instr || ($is_csr && !$is_csr_imm);
          $rs2_valid = $is_r_instr || $is_s_instr || $is_b_instr;
          $rd_valid = ($is_r_instr || $is_i_instr || $is_u_instr || $is_j_instr || $is_csr) && $rd != 5'b0;
          // SYSTEM sub-decode
-         $is_ecall  = $is_system && ($funct3 == 3'b000) && ($instr[31:20] == 12'b0);
-         $is_ebreak = $is_system && ($funct3 == 3'b000) && ($instr[31:20] == 12'b1);
+         $is_ecall  = $instr == 32'h00000073;
+         $is_ebreak = $instr == 32'h00100073;
+         $is_mret   = $instr == 32'h30200073;
          //branch target address
          $br_target_pc[31:0] = $pc + $imm;
 
@@ -151,7 +183,7 @@ m4_asm_end()
 
          // Register File
          // Write port control (sourced from the WB stage)
-         $rf_wr_en = >>3$rd_valid && >>3$rd != 5'b0 && >>3$valid;
+         $rf_wr_en = >>3$rd_valid && >>3$rd != 5'b0 && >>3$valid && (!>>3$valid_misaligned_id && !>>3$valid_misaligned_ex);
          $rf_wr_index[4:0] = >>3$rd;
          // Read port control (combinational, this stage)
          $src1_value[31:0] = /rf[$rs1]$value;
@@ -192,7 +224,14 @@ m4_asm_end()
          $is_srli = $dec_bits ==? 11'b0_101_0010011;
          $is_srai = $dec_bits ==? 11'b1_101_0010011;
          $is_lw = {$funct3, $opcode} ==? 10'b010_0000011;
+         $is_lb = {$funct3, $opcode} ==? 10'b000_0000011;
+         $is_lh = {$funct3, $opcode} ==? 10'b001_0000011;
+         $is_lbu = {$funct3, $opcode} ==? 10'b100_0000011;
+         $is_lhu = {$funct3, $opcode} ==? 10'b101_0000011;
          $is_sw = {$funct3, $opcode} ==? 10'b010_0100011;
+         $is_sb = {$funct3, $opcode} ==? 10'b000_0100011;
+         $is_sh = {$funct3, $opcode} ==? 10'b001_0100011;
+
 
 
 
@@ -206,7 +245,7 @@ m4_asm_end()
          $rs2_fwd_wb = $rs2_valid && >>2$valid && >>2$rd_valid && (>>2$rd == $rs2);
          //Forwarding Data Logic
            //EX/MEM, only load cases
-         $mem_fwd_value[31:0] = >>1$is_lw ? >>1$ld_data : >>1$result;
+         $mem_fwd_value[31:0] = (>>1$is_lw || >>1$is_lh || >>1$is_lhu || >>1$is_lb || >>1$is_lbu) ? >>1$ld_data : >>1$result;
            //MEM/WB rf_wr_data already gated by load condition
          $wb_fwd_value[31:0] = >>2$rf_wr_data;
          //Control Logic
@@ -216,6 +255,7 @@ m4_asm_end()
          $src2_value_fwd[31:0] = $rs2_fwd_mem ? $mem_fwd_value:
                            $rs2_fwd_wb ? $wb_fwd_value:
                            $src2_value;
+
          //CSR signals
            //previous cycle values to reference
          $mscratch_old[31:0] = >>1$mscratch;
@@ -224,38 +264,67 @@ m4_asm_end()
          $mtvec_old[31:0] = >>1$mtvec;
          $mepc_old[31:0] = >>1$mepc;
          $mcause_old[31:0] = >>1$mcause;
+         $mtval_old[31:0] = >>1$mtval;
+         $mstatus_mpie_old = >>1$mstatus_mpie;
+         $mstatus_mie_old = >>1$mstatus_mie;
+           //mstatus_value for an M mode only processor only has 2 variable flops
+         $mstatus_value[31:0] = {19'b0, 2'b11, 3'b0, $mstatus_mpie_old, 3'b0, $mstatus_mie_old, 3'b0};
          $trap_target_pc[31:0] = {$mtvec_old[31:2], 2'b0};
          $mret_target_pc[31:0] = $mepc_old;
+           //misa register fields, editable for future extension
+         $misa_mxl[1:0] = 2'b01; //rv32
+         $misa_extensions[24:0] = 25'h100; //I mode
+         $misa_val[31:0] = {$misa_mxl, 5'b0, $misa_extensions};
            //read-mod-write muxes
-         $csr_read_data[31:0] = ($csr_addr == 12'h340) ? $mscratch_old:
-                                ($csr_addr == 12'hB00 || $csr_addr == 12'hC00) ? $mcycle_old:
-                                ($csr_addr == 12'hB02 || $csr_addr == 12'hC02) ? $minstret_old:
-                                32'b0; //more CSRs go here
+         $csr_read_data[31:0] = ($csr_addr == 12'h300) ? $mstatus_value:
+                                ($csr_addr == 12'h340) ? $mscratch_old:
+                                ($csr_addr == 12'h301) ? $misa_val:
+                                ($csr_addr == 12'h305) ? $mtvec_old:
+                                ($csr_addr == 12'h341) ? $mepc_old:
+                                ($csr_addr == 12'h342) ? $mcause_old:
+                                ($csr_addr == 12'h343) ? $mtval_old:
+                                ($csr_addr == 12'hB00) ? $mcycle_old:
+                                ($csr_addr == 12'hB02) ? $minstret_old:
+                                32'b0; //more CSRs go here, also covers mstatush and all four 0xF1x regs
          $csr_src[31:0] = $is_csr_imm ? $csr_uimm : $src1_value_fwd;
          $csr_new_value[31:0] = ($is_csrrw || $is_csrrwi) ? $csr_src:
                               ($is_csrrs || $is_csrrsi) ? $csr_read_data | $csr_src:
                               ($is_csrrc || $is_csrrci) ? $csr_read_data & ~$csr_src:
                               32'b0;
          $csr_wr_en = $csr_wr_req && $valid;
-           //next state muxes
-
+           //next state flops
          $mscratch[31:0] = $reset ? 32'b0:  //plain storage: hold unless written
                            ($csr_wr_en && $csr_addr == 12'h340) ? $csr_new_value : $mscratch_old;
          $mcycle[31:0] = $reset ? 32'b0:    //background update, counts unless there is an explicit write
                          ($csr_wr_en && $csr_addr == 12'hB00) ? $csr_new_value : ($mcycle_old + 32'b1);
          $minstret[31:0] = $reset ? 32'b0:  //counts retirements not cycles, only adds one if valid and not explicit write
-                           ($csr_wr_en && $csr_addr == 12'hB02) ? $csr_new_value: $minstret_old + {31'b0, $valid};
+                           ($csr_wr_en && $csr_addr == 12'hB02) ? $csr_new_value: $minstret_old + {31'b0, $valid && !$valid_misaligned_id && !$valid_misaligned_ex};
          $mtvec[31:0] = $reset ? 32'b0:
                         ($csr_wr_en && ($csr_addr == 12'h305)) ? $csr_new_value:
                         $mtvec_old;
          $mepc[31:0] = $reset ? 32'b0:
-                       $valid_trap ? $pc:
-                       ($csr_wr_en && ($csr_addr == 12'h341)) ? $csr_new_value:
+                       $take_trap ? $pc:
+                       ($csr_wr_en && ($csr_addr == 12'h341)) ? {$csr_new_value[31:2], 2'b0}: //masks low bits to align
                        $mepc_old;
          $mcause[31:0] = $reset ? 32'b0:
                          $valid_trap ? $trap_cause:
+                         ($valid_misaligned_id || $valid_misaligned_ex) ? 32'b0:
                          ($csr_wr_en && ($csr_addr == 12'h342)) ? $csr_new_value:
                          $mcause_old;
+         $mtval[31:0] = $reset ? 32'b0:
+                        $valid_misaligned_id || ($valid_misaligned_ex && $taken_br) ? $br_target_pc:
+                        $valid_misaligned_ex && $is_jalr ? $jalr_target_pc:
+                        $csr_wr_en && ($csr_addr == 12'h343) ? $csr_new_value:
+                        $mtval_old;
+         $mstatus_mie = $reset ? 1'b0: //interrupts currently enabled
+                        $take_trap ? 1'b0:
+                        $valid_mret ? $mstatus_mpie_old:
+                        ($csr_wr_en && ($csr_addr == 12'h300)) ? $csr_new_value[3] : $mstatus_mie_old;
+         $mstatus_mpie = $reset ? 1'b0: //interrupts enabled before trap
+                         $take_trap ? $mstatus_mie_old:
+                         $valid_mret ? 1'b1:
+                         ($csr_wr_en && ($csr_addr == 12'h300)) ? $csr_new_value[7] : $mstatus_mpie_old;
+
 
          //Branch Logic
          $src2_or_imm_fwd[31:0] = $is_r_instr ? $src2_value_fwd : $imm;
@@ -266,8 +335,13 @@ m4_asm_end()
                      $is_b_instr && $is_bltu ? $src1_value_fwd < $src2_value_fwd:
                      $is_b_instr && $is_bgeu ? $src1_value_fwd >= $src2_value_fwd:
                      1'b0;
-         $mispredicted = $is_b_instr && (($taken_br != $pred_taken_f) || ($taken_br && $pred_taken_f && ($br_target_pc != $br_predicted_pc_f)));
+         $mispredicted = !($is_jal || $is_jalr || $is_mret) //these instructions self correct earlier in the pipeline
+                         && (($taken_br != $pred_taken_f) || ($taken_br && $pred_taken_f && ($br_target_pc != $br_predicted_pc_f)));
          $valid_mispredicted = $valid && $mispredicted;
+         $misaligned_ex = ($taken_br && $br_target_pc[1:0] != 2'b00) || ($is_jalr && $jalr_target_pc[1:0] != 2'b00);
+         $valid_misaligned_ex = $valid && $misaligned_ex;
+         $take_trap = $valid_trap || $valid_misaligned_id || $valid_misaligned_ex;
+
          //ALU Logic
          $result[31:0] = ($is_add || $is_addi) ? $src1_value_fwd + $src2_or_imm_fwd:
                          ($is_slti || $is_slt) ? {31'b0, ($src1_value_fwd < $src2_or_imm_fwd) ^ ($src1_value_fwd[31] != $src2_or_imm_fwd[31])}:
@@ -290,22 +364,37 @@ m4_asm_end()
 
       @3 //MEM
          //Data Memory
-         $dmem_wr_en = $is_sw && $valid;
+         $dmem_wr_en = ($is_sw || $is_sh || $is_sb) && $valid;
          $dmem_index[4:0] = $addr[6:2];
-         $dmem_wr_data[31:0] = $src2_value_fwd;
+         $dmem_wr_data[31:0] = $funct3 == 3'b010 ? $src2_value_fwd:
+                               $funct3 == 3'b001 ? $addr[1:0] == 2'b00 ? {/dmem[$dmem_index]>>1$value[31:16], $src2_value_fwd[15:0]}:
+                                                $addr[1:0] == 2'b10 ? {$src2_value_fwd[15:0], /dmem[$dmem_index]>>1$value[15:0]}:
+                                         32'hFFFFFFFF : //writes a garbage value for now, TODO at tier 1: misalign trap
+                               $funct3 == 3'b000 ? ($addr[1:0] == 2'b00 ? {/dmem[$dmem_index]>>1$value[31:8], $src2_value_fwd[7:0]}:
+                                                $addr[1:0] == 2'b01 ? {/dmem[$dmem_index]>>1$value[31:16], $src2_value_fwd[7:0], /dmem[$dmem_index]>>1$value[7:0]}:
+                                                $addr[1:0] == 2'b10 ? {/dmem[$dmem_index]>>1$value[31:24], $src2_value_fwd[7:0], /dmem[$dmem_index]>>1$value[15:0]}:
+                                                {$src2_value_fwd[7:0], /dmem[$dmem_index]>>1$value[23:0]}) :
+                               32'b0; //dmem_wr_en low guarenteed so doesn't matter
          /dmem[31:0]
             $my_wr_en = |cpu$dmem_wr_en && (|cpu$dmem_index == #dmem);
             $value[31:0] = |cpu$reset ? 32'b0:
                            $my_wr_en ? |cpu$dmem_wr_data:
                            $RETAIN;
-         $ld_data[31:0] = /dmem[$dmem_index]$value;
+         $ld_data[31:0] = $funct3 == 3'b001 ? ($addr[1] ? { {16{/dmem[$dmem_index]$value[31]}}, /dmem[$dmem_index]$value[31:16]}:
+                                                       { {16{/dmem[$dmem_index]$value[15]}}, /dmem[$dmem_index]$value[15:0]}) :
+                          $funct3 == 3'b101 ? ($addr[1] ? {16'b0, /dmem[$dmem_index]$value[31:16]}:
+                                                       {16'b0, /dmem[$dmem_index]$value[15:0]}) :
+                          $funct3 == 3'b000 ? ($addr[1:0] == 2'b00 ? { {24{/dmem[$dmem_index]$value[7]}}, /dmem[$dmem_index]$value[7:0]}:
+                                            $addr[1:0] == 2'b01 ? { {24{/dmem[$dmem_index]$value[15]}}, /dmem[$dmem_index]$value[15:8]}:
+                                            $addr[1:0] == 2'b10 ? { {24{/dmem[$dmem_index]$value[23]}}, /dmem[$dmem_index]$value[23:16]}:
+                                            { {24{/dmem[$dmem_index]$value[31]}}, /dmem[$dmem_index]$value[31:24]}) :
+                          $funct3 == 3'b100 ? ($addr[1:0] == 2'b00 ? {24'b0, /dmem[$dmem_index]$value[7:0]}:
+                                            $addr[1:0] == 2'b01 ? {24'b0, /dmem[$dmem_index]$value[15:8]}:
+                                            $addr[1:0] == 2'b10 ? {24'b0, /dmem[$dmem_index]$value[23:16]}:
+                                            {24'b0, /dmem[$dmem_index]$value[31:24]}) :
+                          /dmem[$dmem_index]$value; //saves gates by aliasing funct3 instead of is_*, order lh, lhu, lb, lbu, lw
       @4 //WB
-         $rf_wr_data[31:0] = $is_lw ? $ld_data : $result;
-
-         // Assert these to end simulation (before Makerchip cycle limit).
-         //m4+tb()
-         //*failed = *cyc_cnt > M4_MAX_CYC;
-         //m4+dmem(32, 32, $reset, $addr[4:0], $wr_en, $wr_data[31:0], $rd_en, $rd_data)
-         //m4+cpu_viz()
+         $rf_wr_data[31:0] = ($is_lw || $is_lh || $is_lhu || $is_lb || $is_lbu) ? $ld_data:
+                             $result;
 \SV
    endmodule
