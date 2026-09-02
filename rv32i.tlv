@@ -1,90 +1,7 @@
 \m4_TLV_version 1d: tl-x.org
 \SV
-   // This code can be found in: https://github.com/stevehoover/LF-Building-a-RISC-V-CPU-Core/risc-v_shell.tlv
-
 m4_include_lib(['https://raw.githubusercontent.com/stevehoover/LF-Building-a-RISC-V-CPU-Core/main/lib/risc-v_shell_lib.tlv'])
-m4_define(['m4_asm_ECALL'],  ['32'b00000000000000000000000001110011'])
-m4_define(['m4_asm_EBREAK'], ['32'b00000000000100000000000001110011'])
-m4_define(['m4_asm_MRET'],   ['32'b00110000001000000000000001110011'])
-m4_define(['m4_asm_WFI'],    ['32'b00010000010100000000000001110011'])
-m4_asm(ADDI,  x1,  x0,  10100100)            //   0  x1 = 164 (handler address)
-m4_asm(CSRRW, x0,  x1,  1100000101)          //   4  mtvec = 164
-m4_asm(ADDI,  x2,  x0,  111111111111)        //   8  x2 = -1 = 0xFFFFFFFF (rollover seed)
-m4_asm(ADDI,  x3,  x0,  100000000)           //  12  x3 = 0x100
-m4_asm(ADDI,  x4,  x0,  1010101011)          //  16  x4 = 0x2AB
-
-   // ---- A: the mhpm* blocks must read zero and must NOT trap ----
-m4_asm(CSRRS, x5,  x0,  101100000011)        //  20  mhpmcounter3   (0xB03)
-m4_asm(CSRRS, x6,  x0,  101100011111)        //  24  mhpmcounter31  (0xB1F)
-m4_asm(CSRRS, x7,  x0,  101110000011)        //  28  mhpmcounterh3  (0xB83)
-m4_asm(CSRRS, x8,  x0,  101110011111)        //  32  mhpmcounterh31 (0xB9F)
-m4_asm(CSRRS, x9,  x0,  1100100011)          //  36  mhpmevent3     (0x323)
-m4_asm(CSRRS, x10, x0,  1100111111)          //  40  mhpmevent31    (0x33F)
-m4_asm(CSRRW, x0,  x2,  101100000011)        //  44  write 0xFFFFFFFF to 0xB03 -- legal, dropped
-m4_asm(CSRRS, x11, x0,  101100000011)        //  48  x11 = 0xB03, still 0 (WARL hardwired zero)
-
-   // ---- A': the >= 3 boundary -- one address below each block must still TRAP ----
-m4_asm(ADDI,  x12, x0,  1000101011)          //  52  x12 = 555 canary
-m4_asm(ADDI,  x13, x0,  1000101011)          //  56  x13 = 555 canary
-m4_asm(CSRRS, x12, x0,  101100000001)        //  60  0xB01 reserved -> TRAP 1, cause 2
-m4_asm(CSRRS, x13, x0,  1100100000)          //  64  0x320 mcountinhibit -> TRAP 2, cause 2
-
-   // ---- B: the high halves exist, and a write hits ONLY the addressed half ----
-m4_asm(CSRRW, x0,  x3,  101100000000)        //  68  mcycle  <= 0x100
-m4_asm(CSRRW, x0,  x4,  101110000000)        //  72  mcycleh <= 0x2AB (mcycle ticks to 0x101)
-m4_asm(CSRRS, x14, x0,  101100000000)        //  76  x14 = mcycle  = 0x101 -- low half survived
-m4_asm(CSRRS, x15, x0,  101110000000)        //  80  x15 = mcycleh = 0x2AB
-m4_asm(CSRRW, x0,  x4,  101110000010)        //  84  minstreth <= 0x2AB
-m4_asm(CSRRS, x16, x0,  101110000010)        //  88  x16 = minstreth = 0x2AB
-
-   // ---- C1: mcycle rollover on a cycle that DOES retire ----
-m4_asm(CSRRW, x0,  x2,  101100000000)        //  92  mcycle <= 0xFFFFFFFF (a WRITE: must not carry)
-m4_asm(ADDI,  x17, x0,  1)                   //  96  retiring instruction; THIS is the rollover cycle
-m4_asm(CSRRS, x18, x0,  101110000000)        // 100  x18 = mcycleh = 0x2AC
-
-   // ---- C2: mcycle rollover on a cycle that does NOT retire -- the load-bearing probe ----
-m4_asm(CSRRW, x0,  x2,  101100000000)        // 104  mcycle <= 0xFFFFFFFF
-m4_asm(ECALL)                                // 108  TRAP 3, cause 11. Does not retire, but the
-                                             //      CYCLE still happened, so mcycle must roll over
-m4_asm(CSRRS, x26, x0,  101110000000)        // 112  x26 = mcycleh = 0x2AD
-
-   // ---- C3: a WRITE of 0xFFFFFFFF is not a rollover ----
-m4_asm(CSRRW, x0,  x2,  101100000000)        // 116  mcycle <= 0xFFFFFFFF
-m4_asm(CSRRW, x0,  x3,  101100000000)        // 120  mcycle_old is 0xFFFFFFFF but this is a WRITE
-m4_asm(CSRRS, x27, x0,  101110000000)        // 124  x27 = mcycleh = 0x2AD, unchanged
-
-   // ---- D1: minstret rollover on a retiring instruction ----
-m4_asm(CSRRW, x0,  x2,  101100000010)        // 128  minstret <= 0xFFFFFFFF
-m4_asm(ADDI,  x28, x0,  1)                   // 132  retires -> minstret rolls over
-m4_asm(CSRRS, x29, x0,  101110000010)        // 136  x29 = minstreth = 0x2AC
-
-   // ---- D2: the mirror of C2 -- a non-retiring cycle must NOT roll minstret over ----
-m4_asm(CSRRW, x0,  x2,  101100000010)        // 140  minstret <= 0xFFFFFFFF
-m4_asm(EBREAK)                               // 144  TRAP 4, cause 3. minstret must HOLD, so the
-                                             //      carry waits for the handler's first instruction
-m4_asm(CSRRS, x31, x0,  101110000010)        // 148  x31 = minstreth = 0x2AD (exactly one carry)
-
-m4_asm(WFI)                                  // 152  must decode as a legal NOP, must NOT trap
-m4_asm(ADDI,  x19, x0,  101010)              // 156  x19 = 42, sentinel: main path completed
-m4_asm(BGE,   x0,  x0,  0)                   // 160  halt
-
-   // ---- shared handler ----
-m4_asm(CSRRS, x22, x0,  1101000001)          // 164  handler: x22 = mepc
-m4_asm(CSRRS, x23, x0,  1101000010)          // 168  x23 = mcause
-m4_asm(ADD,   x20, x20, x23)                 // 172  x20 += mcause
-m4_asm(ADDI,  x21, x21, 1)                   // 176  x21 += 1 (trap counter)
-m4_asm(ADDI,  x25, x22, 100)                 // 180  x25 = mepc + 4
-m4_asm(CSRRW, x0,  x25, 1101000001)          // 184  mepc = mepc + 4
-m4_asm(MRET)                                 // 188  -> PC = mepc
-m4_asm(ADDI,  x30, x0,  1111100111)          // 192  poison (999): must NEVER execute
-m4_asm(BGE,   x0,  x0,  0)                   // 196  handler halt (unreachable)
-m4_asm_end()
-
-
-
-
-\SV
-   m4_makerchip_module   // (Expanded in Nav-TLV pane.)
+m4_makerchip_module   // (Expanded in Nav-TLV pane.)
 \TLV
    |cpu
       @0 //IF
@@ -104,11 +21,16 @@ m4_asm_end()
                           >>2$valid_mret ? >>2$mret_target_pc:
                           $pred_taken_f ? $br_predicted_pc_f:
                           $pc + 32'b100;
+         $imem_in_range = $pc[31:21] == 11'b0; //2MiB
 
       @1 //ID
          //IMem Logic
-         // Single cycle macro based, no SRAM.
-         `READONLY_MEM($pc, $$instr[31:0])
+         $imem_index[18:0] = $pc[20:2];  //19b: covers all 524288 words of the 2MiB range
+         \SV_plus
+            localparam IMEM_WORDS = 524288;
+            logic [31:0] imem_array [0:IMEM_WORDS-1];
+            assign $$imem_word[31:0] = imem_array[$imem_index];
+         $instr[31:0] = $imem_in_range ? $imem_word : 32'b0; //illegal instr trap when out of range
 
          //exception handling signals
          $trap = $illegal_instr || $is_ecall || $is_ebreak;
@@ -200,6 +122,7 @@ m4_asm_end()
                            || ($csr_addr == 12'h341) || ($csr_addr == 12'h342)
                            || ($csr_addr == 12'hB00) || ($csr_addr == 12'hB02)
                            || ($csr_addr == 12'h343) || ($csr_addr == 12'h300)
+                           || ($csr_addr == 12'h304) || ($csr_addr == 12'h344) //mie, mip: mandatory M-mode, read-only zero (no interrupt sources)
                            || ($csr_addr == 12'h310) || ($csr_addr == 12'h301)
                            || ($csr_addr == 12'hF11) || ($csr_addr == 12'hF12)
                            || ($csr_addr == 12'hB80) || ($csr_addr == 12'hB82)
@@ -226,7 +149,6 @@ m4_asm_end()
                       32'b0;
          // valid fields
          $funct7_valid = ($funct7 == 7'b0) || ($funct7 == 7'b0100000);
-         $funct3_valid = $is_r_instr || $is_i_instr || $is_s_instr || $is_b_instr;
          $rs1_valid = $is_r_instr || $is_i_instr || $is_s_instr || $is_b_instr || ($is_csr && !$is_csr_imm);
          $rs2_valid = $is_r_instr || $is_s_instr || $is_b_instr;
          $rd_valid = ($is_r_instr || $is_i_instr || $is_u_instr || $is_j_instr || $is_csr) && $rd != 5'b0;
@@ -239,8 +161,8 @@ m4_asm_end()
          $br_target_pc[31:0] = $pc + $imm;
 
          //silencing signals
-         `BOGUS_USE($rd $rd_valid $rs1 $rs1_valid $rs2 $rs2_valid $opcode $funct3 $funct3_valid $is_u_instr $is_i_instr $is_s_instr $is_b_instr $is_j_instr $is_r_instr
-                    $is_beq $is_bne $is_blt $is_bge $is_bltu $is_bgeu $is_addi $is_add $dec_bits $imm $src1_value $src2_value $is_lw $is_sw $src2_or_imm
+         `BOGUS_USE($rd $rd_valid $rs1 $rs1_valid $rs2 $rs2_valid $opcode $funct3 $is_u_instr $is_i_instr $is_s_instr $is_b_instr $is_j_instr $is_r_instr
+                    $is_beq $is_bne $is_blt $is_bge $is_bltu $is_bgeu $is_addi $is_add $dec_bits $imm $src1_value $src2_value $is_lw $is_sw
                     $illegal_instr $is_ebreak $is_ecall)
 
          // Register File
@@ -258,7 +180,6 @@ m4_asm_end()
                            $RETAIN;
 
          $dec_bits[10:0] = {$instr[30], $funct3, $opcode};
-         $src2_or_imm[31:0] = $is_r_instr ? $src2_value : $imm; //one mux to decide between rs2 and imm
          //determining instruction type (funct7_funct3_opcode)
          $is_beq = $dec_bits ==? 11'bx_000_1100011;
          $is_bne = $dec_bits ==? 11'bx_001_1100011;
@@ -363,7 +284,7 @@ m4_asm_end()
                                   ($valid_misaligned_id || $valid_misaligned_ex) ? 32'd0:
                                   $valid_misaligned_mem ? ($is_store ? 32'd6 : 32'd4):
                                   32'hFFFFFFFF;
-         $exception_tvalue[31:0] = $valid_trap ? 32'b0:
+         $exception_tvalue[31:0] = $valid_trap ? ($is_ebreak ? $pc : 32'b0): //breakpoint reports the faulting address; ecall and illegal-instr report 0
                                    $valid_misaligned_id ? $br_target_pc:
                                    $valid_misaligned_ex ? ($is_jalr ? $jalr_target_pc : $br_target_pc):
                                    $valid_misaligned_mem ? $addr:
@@ -382,7 +303,7 @@ m4_asm_end()
          $mcycle[31:0] = $reset ? 32'b0:    //background update, counts unless there is an explicit write
                          $mcycle_wr ? $csr_new_value : ($mcycle_old + 32'b1);
          $mcycleh[31:0] = $reset ? 32'b0: //upper regs for the 64 bit counters mcycleh and minstreth
-                           $mcycleh_wr ? $csr_new_value + {31'b0, $mcycle_carry}:
+                           $mcycleh_wr ? $csr_new_value:
                            $mcycleh_old + {31'b0, $mcycle_carry};
          $minstret[31:0] = $reset ? 32'b0:  //counts retirements not cycles, only adds one if valid and not explicit write
                            $minstret_wr ? $csr_new_value: $minstret_old + {31'b0, $retires};
@@ -462,33 +383,38 @@ m4_asm_end()
       @3 //MEM
          //Data Memory
          $dmem_wr_en = ($is_sw || $is_sh || $is_sb) && $retires;
-         $dmem_index[4:0] = $addr[6:2];
+         $dmem_index[18:0] = $addr[20:2];  //19b: covers all 524288 words of the 2MiB range
          $dmem_wr_data[31:0] = $funct3 == 3'b010 ? $src2_value_fwd:
-                               $funct3 == 3'b001 ? $addr[1] ? {$src2_value_fwd[15:0], /dmem[$dmem_index]>>1$value[15:0]}:
-                                                              {/dmem[$dmem_index]>>1$value[31:16], $src2_value_fwd[15:0]}:
-                               $funct3 == 3'b000 ? ($addr[1:0] == 2'b00 ? {/dmem[$dmem_index]>>1$value[31:8], $src2_value_fwd[7:0]}:
-                                                $addr[1:0] == 2'b01 ? {/dmem[$dmem_index]>>1$value[31:16], $src2_value_fwd[7:0], /dmem[$dmem_index]>>1$value[7:0]}:
-                                                $addr[1:0] == 2'b10 ? {/dmem[$dmem_index]>>1$value[31:24], $src2_value_fwd[7:0], /dmem[$dmem_index]>>1$value[15:0]}:
-                                                {$src2_value_fwd[7:0], /dmem[$dmem_index]>>1$value[23:0]}) :
+                               $funct3 == 3'b001 ? $addr[1] ? {$src2_value_fwd[15:0], $dmem_rd_data[15:0]}:
+                                                              {$dmem_rd_data[31:16], $src2_value_fwd[15:0]}:
+                               $funct3 == 3'b000 ? ($addr[1:0] == 2'b00 ? {$dmem_rd_data[31:8], $src2_value_fwd[7:0]}:
+                                                $addr[1:0] == 2'b01 ? {$dmem_rd_data[31:16], $src2_value_fwd[7:0], $dmem_rd_data[7:0]}:
+                                                $addr[1:0] == 2'b10 ? {$dmem_rd_data[31:24], $src2_value_fwd[7:0], $dmem_rd_data[15:0]}:
+                                                {$src2_value_fwd[7:0], $dmem_rd_data[23:0]}) :
                                32'b0; //dmem_wr_en low guarenteed so doesn't matter
-         /dmem[31:0]
-            $my_wr_en = |cpu$dmem_wr_en && (|cpu$dmem_index == #dmem);
-            $value[31:0] = |cpu$reset ? 32'b0:
-                           $my_wr_en ? |cpu$dmem_wr_data:
-                           $RETAIN;
-         $ld_data[31:0] = $funct3 == 3'b001 ? ($addr[1] ? { {16{/dmem[$dmem_index]$value[31]}}, /dmem[$dmem_index]$value[31:16]}:
-                                                       { {16{/dmem[$dmem_index]$value[15]}}, /dmem[$dmem_index]$value[15:0]}) :
-                          $funct3 == 3'b101 ? ($addr[1] ? {16'b0, /dmem[$dmem_index]$value[31:16]}:
-                                                       {16'b0, /dmem[$dmem_index]$value[15:0]}) :
-                          $funct3 == 3'b000 ? ($addr[1:0] == 2'b00 ? { {24{/dmem[$dmem_index]$value[7]}}, /dmem[$dmem_index]$value[7:0]}:
-                                            $addr[1:0] == 2'b01 ? { {24{/dmem[$dmem_index]$value[15]}}, /dmem[$dmem_index]$value[15:8]}:
-                                            $addr[1:0] == 2'b10 ? { {24{/dmem[$dmem_index]$value[23]}}, /dmem[$dmem_index]$value[23:16]}:
-                                            { {24{/dmem[$dmem_index]$value[31]}}, /dmem[$dmem_index]$value[31:24]}) :
-                          $funct3 == 3'b100 ? ($addr[1:0] == 2'b00 ? {24'b0, /dmem[$dmem_index]$value[7:0]}:
-                                            $addr[1:0] == 2'b01 ? {24'b0, /dmem[$dmem_index]$value[15:8]}:
-                                            $addr[1:0] == 2'b10 ? {24'b0, /dmem[$dmem_index]$value[23:16]}:
-                                            {24'b0, /dmem[$dmem_index]$value[31:24]}) :
-                          /dmem[$dmem_index]$value; //saves gates by aliasing funct3 instead of is_*, order lh, lhu, lb, lbu, lw
+         \SV_plus
+            localparam DMEM_WORDS = 524288;
+            logic [31:0] dmem_array [0:DMEM_WORDS-1];
+            always_ff @(posedge clk) begin
+               if ($dmem_wr_en) begin
+                  dmem_array[$dmem_index] <= $dmem_wr_data;
+               end
+            end
+            assign $$dmem_rd_data[31:0] = dmem_array[$dmem_index];
+
+         $ld_data[31:0] = $funct3 == 3'b001 ? ($addr[1] ? { {16{$dmem_rd_data[31]}}, $dmem_rd_data[31:16]}:
+                                                       { {16{$dmem_rd_data[15]}}, $dmem_rd_data[15:0]}) :
+                          $funct3 == 3'b101 ? ($addr[1] ? {16'b0, $dmem_rd_data[31:16]}:
+                                                       {16'b0, $dmem_rd_data[15:0]}) :
+                          $funct3 == 3'b000 ? ($addr[1:0] == 2'b00 ? { {24{$dmem_rd_data[7]}}, $dmem_rd_data[7:0]}:
+                                            $addr[1:0] == 2'b01 ? { {24{$dmem_rd_data[15]}}, $dmem_rd_data[15:8]}:
+                                            $addr[1:0] == 2'b10 ? { {24{$dmem_rd_data[23]}}, $dmem_rd_data[23:16]}:
+                                            { {24{$dmem_rd_data[31]}}, $dmem_rd_data[31:24]}) :
+                          $funct3 == 3'b100 ? ($addr[1:0] == 2'b00 ? {24'b0, $dmem_rd_data[7:0]}:
+                                            $addr[1:0] == 2'b01 ? {24'b0, $dmem_rd_data[15:8]}:
+                                            $addr[1:0] == 2'b10 ? {24'b0, $dmem_rd_data[23:16]}:
+                                            {24'b0, $dmem_rd_data[31:24]}) :
+                          $dmem_rd_data; //saves gates by aliasing funct3 instead of is_*, order lh, lhu, lb, lbu, lw
       @4 //WB
          $rf_wr_data[31:0] = ($is_lw || $is_lh || $is_lhu || $is_lb || $is_lbu) ? $ld_data:
                              $result;
