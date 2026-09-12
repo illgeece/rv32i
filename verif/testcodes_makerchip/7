@@ -1,0 +1,24 @@
+Tier 0 trap verification: JAL to a misaligned target (misaligned_id, JAL resolves in ID). STANDALONE - swap this in alone, do not combine with testcodes/6,8,9. No MRET used: the handler captures CSR state and halts rather than resuming, since MRET's m4_asm call syntax isn't confirmed anywhere in the library source, and resuming isn't needed to verify this trap.
+m4_define(['m4_asm_ECALL'],  ['32'b00000000000000000000000001110011'])
+m4_define(['m4_asm_EBREAK'], ['32'b00000000000100000000000001110011'])
+m4_define(['m4_asm_MRET'],   ['32'b00110000001000000000000001110011'])
+m4_asm(ADDI,  x1, x0, 11000)                 //  0  x1 = 24 (handler address)
+m4_asm(CSRRW, x0, x1, 1100000101)            //  4  mtvec = 24
+m4_asm(ADDI,  x2, x0, 1100001001)            //  8  x2 = 777 (canary)
+m4_asm(JAL,   x2, 1)                         // 12  byte_offset=2 -> target=12+2=14 (bit1 set, MISALIGNED) -> should TRAP
+m4_asm(ADDI,  x30, x0, 1111100111)           // 16  poison (999): must NEVER execute
+m4_asm(BGE,   x0, x0, 0)                     // 20  halt -- only reached if the trap failed to redirect
+m4_asm(CSRRS, x3, x0, 1101000001)            // 24  handler: x3 = mepc
+m4_asm(CSRRS, x4, x0, 1101000010)            // 28  handler: x4 = mcause
+m4_asm(CSRRS, x5, x0, 1101000011)            // 32  handler: x5 = mtval
+m4_asm(BGE,   x0, x0, 0)                     // 36  handler halt
+m4_asm_end()
+
+
+Expected Waveforms:
+Reg	Value		Why
+x2	00000309	777 decimal, UNCHANGED -- proves the trapping JAL did not write its link value (would have been 16) to rd
+x3	0000000C	mepc = 12, the JAL instruction's own address (not the target)
+x4	00000000	mcause = 0, instruction-address-misaligned
+x5	0000000E	mtval = 14, the misaligned target address (pc+2)
+x30	00000000	never written -- proves PC actually redirected to the handler instead of falling through to the poison instruction

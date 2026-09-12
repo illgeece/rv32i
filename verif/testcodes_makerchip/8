@@ -1,0 +1,22 @@
+Tier 0 trap verification: taken conditional branch to a misaligned target (misaligned_ex, resolves in EX). STANDALONE - swap this in alone, do not combine with testcodes/6,7,9.
+m4_define(['m4_asm_ECALL'],  ['32'b00000000000000000000000001110011'])
+m4_define(['m4_asm_EBREAK'], ['32'b00000000000100000000000001110011'])
+m4_define(['m4_asm_MRET'],   ['32'b00110000001000000000000001110011'])
+m4_asm(ADDI,  x1, x0, 10100)                 //  0  x1 = 20 (handler address)
+m4_asm(CSRRW, x0, x1, 1100000101)            //  4  mtvec = 20
+m4_asm(BEQ,   x0, x0, 10)                    //  8  x0==x0 always taken; target=8+2=10 (bit1 set, MISALIGNED) -> should TRAP
+m4_asm(ADDI,  x30, x0, 1111100111)           // 12  poison (999): must NEVER execute
+m4_asm(BGE,   x0, x0, 0)                     // 16  halt -- only reached if the trap failed to redirect
+m4_asm(CSRRS, x3, x0, 1101000001)            // 20  handler: x3 = mepc
+m4_asm(CSRRS, x4, x0, 1101000010)            // 24  handler: x4 = mcause
+m4_asm(CSRRS, x5, x0, 1101000011)            // 28  handler: x5 = mtval
+m4_asm(BGE,   x0, x0, 0)                     // 32  handler halt
+m4_asm_end()
+
+
+Expected Waveforms:
+Reg	Value		Why
+x3	00000008	mepc = 8, the BEQ instruction's own address (not the target)
+x4	00000000	mcause = 0, instruction-address-misaligned
+x5	0000000A	mtval = 10, the misaligned target address (pc+2)
+x30	00000000	never written -- proves PC actually redirected to the handler instead of falling through to the poison instruction. (No rd-suppression canary needed here: branches never write rd regardless.)

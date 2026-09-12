@@ -1,0 +1,60 @@
+Further verification for cssrw with rx=x0, counter writes, etc...
+m4_define(['m4_asm_ECALL'],  ['32'b00000000000000000000000001110011'])
+m4_define(['m4_asm_EBREAK'], ['32'b00000000000100000000000001110011'])
+m4_define(['m4_asm_MRET'],   ['32'b00110000001000000000000001110011'])
+m4_asm(ADDI,   x1, x0, 101)                 //  0  x1 = 5
+m4_asm(ADDI,   x2, x0, 11)                  //  4  x2 = 3
+
+   // ---- CSRRWI / CSRRCI (uimm comes from the rs1 slot: "x7" means uimm=7) ----
+m4_asm(CSRRWI, x5, x7, 1101000000)          //  8  uimm=7: x5 = 0,  mscratch = 7
+m4_asm(CSRRCI, x6, x1, 1101000000)          // 12  uimm=1: x6 = 7,  mscratch = 6
+m4_asm(CSRRS,  x7, x0, 1101000000)          // 16  x7 = 6
+
+   // ---- csrw form: write, no read ----
+m4_asm(CSRRW,  x0, x1, 1101000000)          // 20  mscratch = 5, no rd write
+m4_asm(CSRRS,  x8, x0, 1101000000)          // 24  x8 = 5
+
+   // ---- forward CSR read OUT to the next instruction ----
+m4_asm(CSRRS,  x9,  x0, 1101000000)         // 28  x9 = 5
+m4_asm(ADDI,   x10, x9, 1)                  // 32  dist-1 fwd -> x10 = 6
+
+   // ---- forward rs1 INTO a CSR write ----
+m4_asm(ADDI,   x11, x0, 1010)               // 36  x11 = 10
+m4_asm(CSRRW,  x12, x11, 1101000000)        // 40  rs1 fwd dist-1: mscratch = 10, x12 = 5
+m4_asm(CSRRS,  x13, x0,  1101000000)        // 44  x13 = 10
+
+   // ---- CSR writes in a branch shadow must be suppressed ----
+m4_asm(BEQ,    x2, x2, 1100)                // 48  taken +12 -> 60
+m4_asm(CSRRW,  x14, x1, 1101000000)         // 52  shadow 1: must not write
+m4_asm(CSRRWI, x15, x3, 1101000000)         // 56  shadow 2: must not write
+m4_asm(CSRRS,  x16, x0, 1101000000)         // 60  x16 = 10 (unchanged)
+
+   // ---- counter write priority ----
+m4_asm(CSRRW,  x0,  x1, 101100000000)       // 64  mcycle = 5
+m4_asm(CSRRS,  x17, x0, 101100000000)       // 68  x17 = 5
+m4_asm(CSRRS,  x18, x0, 101100000000)       // 72  x18 = 6 (resumed counting)
+
+m4_asm(CSRRS,  x19, x0, 110000000010)       // 76  instret
+m4_asm(BGE, x0, x0, 0)                      // 80  halt
+m4_asm_end()
+
+
+Expected Waveforms:
+Reg	Value	Why
+x1	5
+x2	3
+x5	0	mscratch before CSRRWI
+x6	7	mscratch before CSRRCI
+x7	6	mscratch = 7&~1
+x8	5	mscratch after CSRRW x0,x1
+x9	5	unchanged read
+x10	6	dist-1 forward, x9+1
+x11	10
+x12	5	mscratch before this write
+x13	10	mscratch after rs1-forwarded write
+x14	0	shadow slot 1 — never retires
+x15	0	shadow slot 2 — never retires
+x16	10	mscratch unchanged (shadow writes suppressed)
+x17	5	mcycle, written last instruction
+x18	6	mcycle, +1 background tick
+x19	17	minstret — 19 instructions issued (addr 0–72), minus 2 squashed shadow slots

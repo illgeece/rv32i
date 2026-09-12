@@ -1,0 +1,60 @@
+Tier 0 functional verification: byte/halfword load-store (all 4 byte lanes + both halfword lanes), JALR bit-0 clearing, HINT no-op. No traps in this test.
+m4_define(['m4_asm_ECALL'],  ['32'b00000000000000000000000001110011'])
+m4_define(['m4_asm_EBREAK'], ['32'b00000000000100000000000001110011'])
+m4_define(['m4_asm_MRET'],   ['32'b00110000001000000000000001110011'])
+m4_asm(ADDI, x1, x0, 0)                      //  0  x1 = 0 (dmem base addr)
+m4_asm(ADDI, x2, x0, 10000001)               //  4  x2 = 0x81 (129)
+m4_asm(SB,   x1, x2, 0)                      //  8  mem byte0 = 0x81
+m4_asm(ADDI, x2, x0, 10)                     // 12  x2 = 0x02 (2)
+m4_asm(SB,   x1, x2, 1)                      // 16  mem byte1 = 0x02
+m4_asm(ADDI, x2, x0, 10000011)               // 20  x2 = 0x83 (131)
+m4_asm(SB,   x1, x2, 10)                     // 24  mem byte2 = 0x83
+m4_asm(ADDI, x2, x0, 10000100)               // 28  x2 = 0x84 (132)
+m4_asm(SB,   x1, x2, 11)                     // 32  mem byte3 = 0x84
+
+m4_asm(LB,   x6,  x1, 0)                     // 36  x6  = sext(0x81)
+m4_asm(LB,   x7,  x1, 1)                     // 40  x7  = sext(0x02)
+m4_asm(LB,   x8,  x1, 10)                    // 44  x8  = sext(0x83)
+m4_asm(LB,   x9,  x1, 11)                    // 48  x9  = sext(0x84)
+m4_asm(LBU,  x10, x1, 0)                     // 52  x10 = zext(0x81)
+m4_asm(LBU,  x11, x1, 10)                    // 56  x11 = zext(0x83)
+m4_asm(LH,   x12, x1, 0)                     // 60  x12 = sext(halfword @0)
+m4_asm(LH,   x13, x1, 10)                    // 64  x13 = sext(halfword @2)
+m4_asm(LHU,  x14, x1, 0)                     // 68  x14 = zext(halfword @0)
+m4_asm(LHU,  x15, x1, 10)                    // 72  x15 = zext(halfword @2)
+m4_asm(LW,   x16, x1, 0)                     // 76  x16 = word0
+
+m4_asm(ADDI, x2, x0, 1010101011)             // 80  x2 = 0x2AB (683)
+m4_asm(SH,   x1, x2, 100)                    // 84  mem halfword @4 = 0x02AB
+m4_asm(ADDI, x2, x0, 101010101)              // 88  x2 = 0x155 (341)
+m4_asm(SH,   x1, x2, 110)                    // 92  mem halfword @6 = 0x0155  -> word1 = 0x015502AB
+m4_asm(LW,   x17, x1, 100)                   // 96  x17 = word1
+
+m4_asm(ADDI, x18, x0, 1101100)               // 100 x18 = 108 (landing pad addr)
+m4_asm(JALR, x19, x18, 1)                    // 104 link=108; target=(108+1)&~1=108 (bit0 cleared)
+m4_asm(ADDI, x20, x0, 1)                     // 108 landing pad reached -> x20=1
+
+m4_asm(ADDI, x0, x0, 101)                    // 112 HINT: ADDI x0,x0,5 -- must NOT trap
+m4_asm(ADDI, x21, x0, 101010)                // 116 x21=42: proves the HINT above did not trap
+
+m4_asm(BGE, x0, x0, 0)                       // 120 halt
+m4_asm_end()
+
+
+Expected Waveforms:
+Reg	Value		Why
+x6	FFFFFF81	LB addr0 (0x81, sign bit set) sign-extends negative
+x7	00000002	LB addr1 (0x02) sign-extends positive (no-op)
+x8	FFFFFF83	LB addr2 (0x83) sign-extends negative
+x9	FFFFFF84	LB addr3 (0x84) sign-extends negative -- exercises the addr[1:0]==11 lane (the one with the earlier width bug)
+x10	00000081	LBU addr0 zero-extends
+x11	00000083	LBU addr2 zero-extends
+x12	00000281	LH addr0 -- halfword {byte1,byte0}=0x0281, sign bit clear, sign-extend is a no-op
+x13	FFFF8483	LH addr2 -- halfword {byte3,byte2}=0x8483, sign bit set, sign-extends negative
+x14	00000281	LHU addr0 zero-extends
+x15	00008483	LHU addr2 zero-extends
+x16	84838281	LW addr0 -- confirms all 4 SB byte-lane merges (addr[1:0]=00/01/10/11) landed correctly
+x17	015502AB	LW addr4 -- confirms both SH halfword-lane merges (addr[1:0]=00 and =10) landed correctly
+x19	0000006C	JALR link = pc_of_jalr(104)+4
+x20	00000001	proves fetch resumed normally after the JALR (didn't hang/crash) -- NOTE: this alone does not prove bit-0 was cleared, since this imem model fetches by word index (addr[N:2]) so address 108 and 109 read the same instruction either way. To actually confirm the bit-0-clear fix, check the $jalr_target_pc signal directly in the waveform at the JALR's EX cycle and verify its LSB is 0.
+x21	0000002A	proves ADDI x0,x0,5 (HINT, rd=x0) executed as a no-op rather than trapping as illegal

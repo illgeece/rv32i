@@ -1,0 +1,42 @@
+*for testing CSR implementation
+**these instructions assemble as i type based on current encoding
+m4_define(['m4_asm_ECALL'],  ['32'b00000000000000000000000001110011'])
+m4_define(['m4_asm_EBREAK'], ['32'b00000000000100000000000001110011'])
+m4_define(['m4_asm_MRET'],   ['32'b00110000001000000000000001110011'])
+m4_asm(AUIPC, x20, 0)                        //  0  x20 = 0
+m4_asm(ADDI,  x20, x20, 1000000)             //  4  x20 = 64 (handler = halt addr, post-shift)
+m4_asm(CSRRW, x0, x20, 1100000101)           //  8  mtvec = 64
+m4_asm(ADDI,   x1, x0, 101)                  // x1 = 5
+m4_asm(ADDI,   x3, x0, 1)                    // x3 = 1
+
+m4_asm(CSRRW,  x5, x1, 1101000000)           // x5 = 0 (old), mscratch = 5
+m4_asm(CSRRS,  x6, x0, 1101000000)           // rs1=x0 -> read only. x6 = 5
+m4_asm(CSRRSI, x7, x2, 1101000000)           // uimm=2 via "x2". x7 = 5, mscratch = 5|2 = 7
+m4_asm(CSRRC,  x8, x3, 1101000000)           // x8 = 7, mscratch = 7 & ~1 = 6
+m4_asm(CSRRS,  x9, x0, 1101000000)           // x9 = 6
+
+m4_asm(CSRRS,  x10, x0, 110000000000)        // x10 = cycle
+m4_asm(ADDI,   x0,  x0, 0)                   // nop
+m4_asm(ADDI,   x0,  x0, 0)                   // nop
+m4_asm(CSRRS,  x11, x0, 110000000000)        // x11 = cycle
+m4_asm(SUB,    x12, x11, x10)                // x12 = 3 (slots == cycles)
+
+m4_asm(CSRRW,  x14, x1, 110000000000)        // illegal: write to read-only cycle
+m4_asm(BGE, x0, x0, 0)                       // halt
+m4_asm_end()
+
+Expected Waveforms:
+Reg	    Value (first pass)	Why
+x1	    5	ADDI x1,x0,5
+x3	    1	ADDI x3,x0,1
+x5	    0	old mscratch, pre-write
+x6	    5	mscratch after CSRRW
+x7	    5	mscratch before CSRRSI
+x8	    7	mscratch = 5|2 before CSRRC
+x9	    6	mscratch = 7&~1
+x10	    n	mcycle at read 1
+x11	    n+3	mcycle 3 cycles later
+x12	    3	x11-x10 — reset-independent, since mcycle free-runs 1/cycle
+x14	    0, forever	traps every time, never written
+mcause	    2	illegal instruction
+mepc	    pc of the CSRRW

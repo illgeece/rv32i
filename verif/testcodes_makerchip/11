@@ -1,0 +1,113 @@
+Tier 4 machine-information CSR verification: the four read-only ID CSRs (mvendorid/marchid/mimpid/mhartid) must read without trapping, misa must read its ISA encoding and silently ignore writes (WARL), and writes to the read-only 0xF1x block must raise illegal-instruction. Also pins the exact rule that decides "is this a write": rs1 being register x0, NOT rs1 holding the value zero. STANDALONE - swap this in alone, do not combine with testcodes/6,7,8,9,10.
+m4_define(['m4_asm_ECALL'],  ['32'b00000000000000000000000001110011'])
+m4_define(['m4_asm_EBREAK'], ['32'b00000000000100000000000001110011'])
+m4_define(['m4_asm_MRET'],   ['32'b00110000001000000000000001110011'])
+m4_asm(ADDI,  x1,  x0,  1001000)             //   0  x1 = 72 (handler address)
+m4_asm(CSRRW, x0,  x1,  1100000101)          //   4  mtvec = 72
+m4_asm(ADDI,  x2,  x0,  11111111111)         //   8  x2 = 2047 (junk payload for CSR writes)
+m4_asm(ADDI,  x11, x0,  1000101011)          //  12  x11 = 555 (canary)
+m4_asm(ADDI,  x12, x0,  1000101011)          //  16  x12 = 555 (canary)
+m4_asm(ADDI,  x13, x0,  0)                   //  20  x13 = 0 -- a NON-x0 register that HOLDS zero
+
+   // ---- A: reads of the read-only ID CSRs must not trap ----
+m4_asm(CSRRS, x3,  x0,  111100010001)        //  24  x3 = mvendorid (0xF11)
+m4_asm(CSRRS, x4,  x0,  111100010010)        //  28  x4 = marchid   (0xF12)
+m4_asm(CSRRS, x5,  x0,  111100010011)        //  32  x5 = mimpid    (0xF13)
+m4_asm(CSRRS, x6,  x0,  111100010100)        //  36  x6 = mhartid   (0xF14)
+m4_asm(CSRRS, x7,  x0,  1100000001)          //  40  x7 = misa      (0x301)
+
+   // ---- B: misa is WARL read-WRITE -- write is accepted, dropped, and must NOT trap ----
+m4_asm(CSRRW, x9,  x2,  1100000001)          //  44  x9 = OLD misa; writes 2047, which must be discarded
+m4_asm(CSRRS, x8,  x0,  1100000001)          //  48  x8 = misa, must be unchanged
+
+   // ---- C: write to a read-only CSR must trap ----
+m4_asm(CSRRW, x11, x2,  111100010001)        //  52  TRAP (cause 2); x11 must keep its canary
+
+   // ---- D: rs1 holds zero but is not x0, so this IS a write -- must still trap ----
+m4_asm(CSRRS, x12, x13, 111100010100)        //  56  TRAP (cause 2); x12 must keep its canary
+
+   // ---- D': rs1 IS x0, so the write is suppressed and the read-only access is legal ----
+m4_asm(CSRRS, x10, x0,  111100010001)        //  60  x10 = mvendorid, NO trap
+
+m4_asm(ADDI,  x14, x0,  101010)              //  64  x14 = 42, sentinel: main path ran to completion
+m4_asm(BGE,   x0,  x0,  0)                   //  68  halt
+
+   // ---- shared handler: accumulate cause, count traps, skip the faulting instruction ----
+m4_asm(CSRRS, x22, x0,  1101000010)          //  72  handler: x22 = mcause
+m4_asm(ADD,   x20, x20, x22)                 //  76  x20 += mcause
+m4_asm(ADDI,  x21, x21, 1)                   //  80  x21 += 1 (trap counter)
+m4_asm(CSRRS, x23, x0,  1101000001)          //  84  x23 = mepc
+m4_asm(ADDI,  x23, x23, 100)                 //  88  x23 = mepc + 4
+m4_asm(CSRRW, x0,  x23, 1101000001)          //  92  mepc = mepc + 4
+m4_asm(MRET)                                 //  96  -> PC = mepc
+m4_asm(ADDI,  x30, x0,  1111100111)          // 100  poison (999): must NEVER execute
+m4_asm(BGE,   x0,  x0,  0)                   // 104  handler halt (unreachable)
+m4_asm_end()
+
+
+misa encoding assumed by this test: MXL = 2'b1 in bits [31:30] (RV32) and the extension bitmap bit
+8 = 'I', everything else zero -> 0x40000100. If you encode misa differently (e.g. you decide to
+report 0), adjust x7/x8/x9 below to match; nothing else in the test depends on the value.
+
+The four 0xF1x CSRs all read zero, so their VALUES prove nothing on their own -- a trapping access
+would leave the same 0 in rd. What proves they are implemented is the trap count in x21. This test
+is built so that every distinct Tier-4 mistake produces a different x21.
+
+Expected Waveforms:
+Reg	Value		Why
+x1	00000048	72, the handler address written to mtvec
+x2	000007FF	2047, the payload every CSR write in this test tries to store
+x3	00000000	mvendorid -- 0 is the legal "non-commercial implementation" encoding
+x4	00000000	marchid -- 0 is the legal "not implemented" encoding
+x5	00000000	mimpid -- 0 is the legal "not implemented" encoding
+x6	00000000	mhartid -- 0 is the REQUIRED value here, not a sentinel: at least one hart must read 0, and this core has exactly one
+x7	40000100	misa -- MXL=1 (RV32) in bits 31:30, plus bit 8 ('I'). Note Zicsr is NOT representable here; misa has no bits for multi-letter Z* extensions
+x8	40000100	misa AFTER writing 2047 to it -- unchanged. This is WARL-ignore, and it works because no next-state mux is keyed on 0x301, i.e. because no storage was written for it
+x9	40000100	CSRRW returns the OLD CSR value to rd, so this reads misa a second time and simultaneously proves the write at 44 did not trap
+x10	00000000	mvendorid read via CSRRS with rs1=x0 -- write suppressed, so a read-only CSR is legal to touch
+x11	0000022B	555, canary UNCHANGED -- the CSRRW at 52 trapped, so it never wrote its rd. Without the canary this is indistinguishable from a successful read of mvendorid (which is also 0)
+x12	0000022B	555, canary UNCHANGED -- the CSRRS at 56 trapped even though x13 holds zero
+x13	00000000	the non-x0 register holding zero, used as rs1 at 56
+x14	0000002A	42 -- sentinel proving the main path reached the end. If any Group A/B access wrongly trapped, this still gets set (the handler returns), so x14 alone is not sufficient; read it together with x21
+x20	00000004	sum of mcause across all traps = 2 + 2. Both traps were illegal-instruction; any other cause shows up here as a wrong total
+x21	00000002	THE load-bearing value: exactly two traps, from address 52 and address 56, and nothing else
+x22	00000002	mcause from the LAST trap = 2, illegal instruction
+x23	0000003C	60 -- mepc(56) + 4 from the last trap, i.e. the return address that resumed execution at instruction 60
+x30	00000000	poison never written -- address 100 sits in MRET's 2-instruction shadow on both handler passes
+
+Notes:
+- Control flow: the trap at 52 squashes 56 and 60, runs the handler, and MRETs back to 56. Address
+  56 then executes for real, traps again, squashes 60 and 64, runs the handler, and MRETs back to
+  60. So 56 and 60 are each fetched twice and 64/68 run once. Same double-fetch shape as
+  testcodes/10, just entered twice.
+- x21 is the diagnostic. Trap count by failure mode:
+    x21 = 2   correct
+    x21 = 10  no Tier-4 work applied at all -- all five addresses still missing from
+              $csr_addr_valid, so every CSR access in Groups A/B/C/D/D' traps
+    x21 = 7   EITHER the four 0xF1x addresses are missing from $csr_addr_valid (24-36 and 60 trap),
+              OR the CSRRS rs1=x0 write-suppression is gone so every read-only read traps. These
+              two are indistinguishable from the register file alone -- check $csr_addr_valid
+              first, then $csr_wr_req in the waveform at address 24
+    x21 = 5   0x301 missing from $csr_addr_valid (40, 44, 48 trap)
+    x21 = 3   0x301 wrongly classified read-only, so the write at 44 traps
+    x21 = 1   with x12 = 0: $csr_src_zero tested the VALUE in rs1 instead of the register number,
+              so the access at 56 was treated as a read and let through
+    x21 = 0   the read-only-write trap term never fires (confirm with x11 = x12 = 0), or mtvec
+              never took the handler address and the trap path is dead entirely
+  Independent of x21: x8 = 000007FF means misa was given real storage -- a next-state mux keyed on
+  0x301 that should not exist.
+- Groups C and D together are the whole read-only-write story, and D is the sharper half. The Zicsr
+  rule is stated in terms of "rs1=x0", the register NUMBER, not "the value written is zero". x13
+  holds 0 but is register 13, so $csr_src_zero must stay low and the access must trap. An
+  implementation that tested $src1_value == 0 instead of $rs1 == 5'b0 passes C and fails D, and the
+  failure is visible as x12 = 00000000 with x21 = 1.
+- Group D' (address 60) is the inverse guard: it must NOT trap, because CSRRS with rs1=x0 performs
+  no write and therefore cannot raise the read-only-CSR exception. Getting C right by simply
+  trapping on any access to 0xF1x would break this and show as x21 = 3 with x10 = 0.
+- NOT covered: writes to 0xF12 and 0xF13 (only 0xF11 and 0xF14 are exercised as write targets). All
+  four share the same $csr_addr[11:10] == 2'b11 term, so covering two of them covers the logic --
+  but not a per-address typo in $csr_addr_valid. A single mistyped 0xF1x address shows up as one
+  extra trap (x21 = 3) with that CSR's read still returning 0, so a x21 of 3 should be checked
+  against BOTH that case and the misa-read-only case above before concluding which it is.
+- Run this only after the Tier 4 edits are in. On the pre-Tier-4 core it produces x21 = 10 and
+  x20 = 00000014, since none of the five addresses are recognised yet.

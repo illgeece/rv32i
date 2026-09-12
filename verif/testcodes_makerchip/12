@@ -1,0 +1,155 @@
+Tier 2 trap-CSR field-semantics verification: mtvec MODE legalization (WARL), mepc low-2-bit hardwiring (IALIGN=32), mcause full-width read-back (WLRL), and the load-bearing one -- mtval must be WRITTEN on every trap, never left stale. Takes six traps in sequence, alternating nonzero-mtval causes with zero-mtval causes so a stale-retain bug has something stale to retain. Also separates mepc from mtval on a misaligned jump. STANDALONE - swap this in alone, do not combine with testcodes/6,7,8,9,10,11.
+m4_define(['m4_asm_ECALL'],  ['32'b00000000000000000000000001110011'])
+m4_define(['m4_asm_EBREAK'], ['32'b00000000000100000000000001110011'])
+m4_define(['m4_asm_MRET'],   ['32'b00110000001000000000000001110011'])
+m4_asm(ADDI,  x1,  x0,  1100100)             //   0  x1 = 100 (handler address, 4-aligned)
+m4_asm(ADDI,  x2,  x1,  11)                  //   4  x2 = 103 = handler | MODE=3 (dirty vector)
+
+   // ---- A: mtvec is WARL and only Direct(0) is supported -- MODE must legalize on the WRITE ----
+m4_asm(CSRRW, x0,  x2,  1100000101)          //   8  mtvec = 103; MODE bits must be forced to 0
+m4_asm(CSRRS, x3,  x0,  1100000101)          //  12  PROBE A: x3 = mtvec read-back, must be 100
+
+   // ---- C: mepc[1:0] are hardwired 0 because IALIGN=32 -- mask on the WRITE port ----
+m4_asm(ADDI,  x5,  x0,  11111111111)         //  16  x5 = 2047 = 0x7FF (both low bits set)
+m4_asm(CSRRW, x0,  x5,  1101000001)          //  20  mepc = 0x7FF; low 2 bits must be dropped
+m4_asm(CSRRS, x4,  x0,  1101000001)          //  24  PROBE C: x4 = mepc read-back, must be 0x7FC
+
+   // ---- TRAP 1: misaligned JAL (detected at ID) -- mepc and mtval must DIFFER ----
+m4_asm(JAL,   x0,  11)                       //  28  target = 28 + 6 = 34, not 4-aligned. cause 0
+m4_asm(ADD,   x8,  x22, x0)                  //  32  PROBE E1: mepc of trap 1, must be 28 (the JAL)
+m4_asm(ADD,   x9,  x23, x0)                  //  36  PROBE E2: mtval of trap 1, must be 34 (target)
+
+   // ---- TRAP 2: ECALL carries no datum -- mtval must be WRITTEN to 0, not left at 34 ----
+m4_asm(ECALL)                                //  40  cause 11
+m4_asm(ADD,   x10, x23, x0)                  //  44  PROBE D1: mtval of trap 2, must be 0
+
+   // ---- TRAP 3: misaligned JALR (detected at EX) -- exercises the jalr_target_pc arm ----
+m4_asm(ADDI,  x6,  x0,  111000)              //  48  x6 = 56 (4-aligned JALR base)
+m4_asm(JALR,  x0,  x6,  10)                  //  52  target = (56+2) & ~1 = 58, misaligned. cause 0
+m4_asm(ADD,   x11, x23, x0)                  //  56  mtval of trap 3, must be 58
+
+   // ---- TRAP 4: illegal instruction (unimplemented CSR 0x800) -- mtval must be 0, not 58 ----
+m4_asm(CSRRS, x0,  x0,  100000000000)        //  60  CSR 0x800 not in $csr_addr_valid. cause 2
+m4_asm(ADD,   x12, x23, x0)                  //  64  PROBE D2: mtval of trap 4, must be 0
+
+   // ---- TRAP 5: misaligned TAKEN branch -- exercises the third misalign arm (br_target_pc @EX) ----
+m4_asm(BGE,   x0,  x0,  110)                 //  68  0>=0 taken; target = 68 + 6 = 74. cause 0
+m4_asm(ADD,   x13, x23, x0)                  //  72  mtval of trap 5, must be 74
+
+   // ---- TRAP 6: EBREAK -- mtval must be 0, not 74 ----
+m4_asm(EBREAK)                               //  76  cause 3
+m4_asm(ADD,   x14, x23, x0)                  //  80  PROBE D3: mtval of trap 6, must be 0
+
+   // ---- F: mcause is WLRL but kept full-width on purpose -- guard against "clever" narrowing ----
+m4_asm(CSRRW, x0,  x5,  1101000010)          //  84  mcause = 2047 (x5 still holds 0x7FF)
+m4_asm(CSRRS, x15, x0,  1101000010)          //  88  PROBE F: x15 must read back all 2047
+
+m4_asm(ADDI,  x19, x0,  101010)              //  92  x19 = 42, sentinel: main path ran to completion
+m4_asm(BGE,   x0,  x0,  0)                   //  96  halt
+
+   // ---- shared handler: snapshot mepc/mtval/mcause, count, skip the faulting instruction ----
+m4_asm(CSRRS, x22, x0,  1101000001)          // 100  handler: x22 = mepc
+m4_asm(CSRRS, x23, x0,  1101000011)          // 104  x23 = mtval  (0x343)
+m4_asm(CSRRS, x24, x0,  1101000010)          // 108  x24 = mcause (0x342)
+m4_asm(ADD,   x20, x20, x24)                 // 112  x20 += mcause
+m4_asm(ADDI,  x21, x21, 1)                   // 116  x21 += 1 (trap counter)
+m4_asm(ADDI,  x25, x22, 100)                 // 120  x25 = mepc + 4
+m4_asm(CSRRW, x0,  x25, 1101000001)          // 124  mepc = mepc + 4
+m4_asm(MRET)                                 // 128  -> PC = mepc
+m4_asm(ADDI,  x30, x0,  1111100111)          // 132  poison (999): must NEVER execute
+m4_asm(BGE,   x0,  x0,  0)                   // 136  handler halt (unreachable)
+m4_asm_end()
+
+
+The handler does NOT clobber x22/x23/x24 after loading them, so the main path can snapshot the
+last trap's mepc/mtval into a fresh register on the instruction it returns to. That is why every
+trap here is followed immediately by an ADD -- the observation happens on the main path, not in
+the handler, which keeps the handler to one copy while still giving per-trap results.
+
+Expected Waveforms:
+Reg	Value		Why
+x1	00000064	100, the handler address
+x2	00000067	103 = handler | 3 -- the deliberately dirty value written to mtvec
+x3	00000064	PROBE A: mtvec read-back = 100. MODE was legalized to Direct on the write port. If this reads 00000067 the WARL mask is missing -- and note nothing else in the test will fail, see Notes
+x4	000007FC	PROBE C: mepc read-back = 2047 with bits [1:0] cleared. Upper 30 bits survive, proving this is a mask and not a dropped write
+x5	000007FF	2047, the payload for both the mepc and the mcause write
+x6	00000038	56, the 4-aligned base the misaligned JALR adds 2 to
+x8	0000001C	PROBE E: mepc of trap 1 = 28, the address of the JAL ITSELF. The exception is reported on the jump, not on the target
+x9	00000022	PROBE E: mtval of trap 1 = 34, the misaligned TARGET. x8 and x9 must DIFFER -- that difference is the whole point of the probe
+x10	00000000	PROBE D: mtval after ECALL. Must be written to zero. If this reads 00000022 mtval was left holding trap 1's target -- the stale-retain bug
+x11	0000003A	mtval of trap 3 = 58, the misaligned JALR target ((56+2) & ~1). Covers the $is_jalr arm of the mtval mux
+x12	00000000	PROBE D: mtval after the illegal-instruction trap. If this reads 0000003A, stale from trap 3. If it reads the instruction encoding, you chose the instruction-bits option -- legal, but declare it in riscv-config (see Notes)
+x13	0000004A	mtval of trap 5 = 74, the misaligned taken-branch target. Covers the $taken_br arm
+x14	00000000	PROBE D: mtval after EBREAK. If this reads 0000004A, stale from trap 5
+x15	000007FF	PROBE F: mcause read-back = full 2047. mcause is WLRL so a narrowed implementation would be spec-legal, but it would diverge from Spike and fail RISCOF signature comparison. This pins the full width
+x19	0000002A	42 -- sentinel proving the main path reached the end
+x20	00000010	sum of mcause across all six traps = 0 + 11 + 0 + 2 + 0 + 3 = 16
+x21	00000006	THE trap count: six traps, in order 0, 11, 0, 2, 0, 3
+x22	0000004C	76 -- mepc of the LAST trap (the EBREAK at 76)
+x23	00000000	mtval of the LAST trap (EBREAK) = 0
+x24	00000003	mcause of the LAST trap = 3, breakpoint. Captured before the mcause write at 84, so the 2047 does not appear here
+x25	00000050	80 -- mepc + 4 from the last trap, the address execution resumed at
+x30	00000000	poison never written -- address 132 sits in MRET's 2-instruction shadow on all six handler passes
+
+Notes:
+- The four probe groups are independent. A, C and F each fail as a single wrong register with the
+  rest of the test unaffected. D and E are the ones that need the six-trap sequence.
+
+- PROBE D is why this test is six traps and not two. A stale-retain bug is invisible to a
+  single-trap test: with nothing previously in mtval, "wrote 0" and "retained 0" are the same
+  waveform. Every zero-mtval trap here is preceded by a nonzero-mtval trap, so x10, x12 and x14
+  each have a specific wrong value they would show. Three independent chances to catch it, one per
+  $valid_trap sub-cause.
+
+- PROBE E is a direct check against a common misreading (and against roadmap.md:38 and :70, which
+  state it wrongly). mepc holds the address of the instruction that ENCOUNTERED the exception --
+  the jump. mtval holds the faulting address -- the target. x8 == x9 means mepc was fed the target.
+  That bug also self-reveals in control flow: mepc would be 34, the handler would return to 38,
+  which word-indexes to address 36, so the ADD at 32 never runs and x8 reads 00000000 as well.
+
+- The single most likely implementation slip is writing the new mtval arm as $take_trap ? 32'b0
+  instead of $valid_trap ? 32'b0. $take_trap is the UNION of the trap and both misalign terms, so
+  it would zero mtval for every trap including the misaligned ones. Signature: x9, x11 and x13 all
+  read 00000000 while x10, x12 and x14 are correctly 0. If all seven mtval registers are zero,
+  check the arm's condition before checking anything else.
+
+- x21 is the control-flow diagnostic. Trap count by failure mode:
+    x21 = 6   correct
+    x21 = 5   exactly one misalign trap is not firing. Which one is named by the zero:
+              x8 = x9 = 0 -> trap 1, $valid_misaligned_id (JAL, detected at ID)
+              x11 = 0     -> trap 3, the $is_jalr term of $misaligned_ex
+              x13 = 0     -> trap 5, the $taken_br term of $misaligned_ex
+    x21 = 3   no misalignment detection at all; x8 through x14 all read 0. Note x20 is still
+              00000010, because the three missing causes are all 0 -- x21, not x20, is the detector
+    x21 = 0   mtvec never took the handler address and the trap path is dead entirely
+
+- PROBE A cannot be caught by control flow in this core, only by x3. If the MODE mask is missing,
+  mtvec reads 103 and $trap_target_pc (once you delete its redundant mask) drives PC = 103 -- but
+  READONLY_MEM fetches by word index, so 103 word-indexes to 100 and the handler runs correctly
+  anyway, with every PC in it skewed by +3. Same blind spot testcodes/6 hit on JALR bit-0. x3 is
+  the only witness; do not conclude mtvec is fine because the traps landed.
+
+- On mtval for the illegal-instruction case: writing the 32-bit instruction encoding instead of 0
+  is equally spec-legal, and $instr is already live at @2 so it costs one mux leg. This test
+  expects 0 (the Rocket / CV32E20 choice). If you take the instruction-bits option, x12 becomes the
+  encoding of the CSRRS at address 60 and you must set mtval_update in riscv-config to match, or
+  RISCOF will compare you against a Spike configured the other way.
+
+- Immediate encodings used here, since two of them are formats no earlier testcode exercised:
+    JAL at 28, argument 11   -- J-type argument is the byte offset DIVIDED BY TWO (the macro
+                                slices imm[20:1] from a 20-bit field), so 3 -> +6 bytes -> 34
+    BGE at 68, argument 110  -- B-type argument IS the byte offset, bit 0 discarded, so -> +6 -> 74
+  Both land 2 mod 4 from a 4-aligned PC, which is the only misalignment RV32I can produce. If x9 or
+  x13 is nonzero but not 34 / 74, decode @1$instr in the waveform before suspecting the CPU.
+
+- The misaligned JAL target (34) IS fetched for one cycle before the trap redirect wins, because
+  the JAL redirect at ID fires a cycle earlier than $take_trap at EX. It word-indexes to address 32
+  and is squashed by the >>2$valid_misaligned_id term in $on_path, so it is harmless -- but it is
+  the reason that term exists, and the waveform will show a PC of 34. The JALR and branch targets
+  are never fetched at all, since $take_trap outranks $valid_jalr and $valid_mispredicted in the
+  $next_pc priority chain.
+
+- NOT covered: mcause legal-value legalization (deliberately -- this test pins the OPPOSITE, that
+  no narrowing happened), load/store address misaligned (causes 4 and 6, Tier 1, not implemented
+  yet -- their mtval arms are still missing from the mux), and mtvec BASE bits above [1:0], which
+  no arm of this test perturbs.

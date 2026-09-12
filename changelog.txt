@@ -38,6 +38,23 @@ Tested with 4.
 
 Refined trap signal to actually do something using CSRs. This required a complete rebuilding of the valid signal into two different classifications, on path vs off path. A trap instruction is on the right path but cannot retire requiring this distinction. Purely additive, no need to switch existing valid dependencies.
 
-Added the rest of the CSR suite, added $on_path signal that gates to valid allowing for traps that are in the shadow of invalid instructions
+Added the rest of the CSR suite, added $on_path signal that gates to valid allowing for traps that are in the shadow of invalid instructions.
+The instruction decode signal drops a few bits that allow some illegal instructions (MUL for example) to fall through because of the loose encoding on the $illegal_instr signal. Until now it had only compared opcodes allowing instructions with an illegal funct7 to pass through. A new signal was added to compare both fields.
+Both signals were gated into the $illegal_instr signal.
 
 Precise exceptions have been reached. Instruction N traps its $valid signal to 0 which gates pretty much everything: register/memory/csr reads and writes. Instructions N+1 and N+2 are squashed by $on_path and everything before S is already committed due to not having speculation.
+
+Added halfword/byte load/store support.
+Added catch for branch address misalignment.
+Tested both with test suite 6
+
+Added mstatus and mstatush completing the trap/return state machine.
+Used two flops for MIE and MPIE and masked the rest of mstatus to zero making WPRI-reads-zero and MPP-WARL fall out for free instead of needing a write mask.
+mstatush is little-endian and M-mode-only so it reads zero through the existing default arm of the read mux and silently swallows writes. Trap entry now pushes (MPIE<=MIE,MIE<=0) and MRET pops (MIE<=MPIE, MPIE<=1)
+
+Introduced $take_trap at EX as the union of trapped but on path instructions
+
+ECALL/EBREAK/MRET encoding tightened. Narrowed recognizers trap for free, and a malformed ECALL now correctly reports cause 2 instead of 11.
+Tested with 10.
+
+Added mvendorid, marchid, mimpid, mhartid, and misa

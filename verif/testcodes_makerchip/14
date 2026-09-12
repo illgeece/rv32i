@@ -1,0 +1,169 @@
+Tier 5 counter verification: the 87 hardwired-zero mhpm* CSRs (range decode, including both sides of the >=3 boundary), mcycleh/minstreth existence and half-write isolation, and the 32-to-64 bit carry -- tested at BOTH polarities, because mcycle carries on a cycle where nothing retires and minstret must not. Also confirms WFI decodes as a legal NOP. STANDALONE - swap this in alone, do not combine with testcodes/6,7,8,9,10,11,12,13.
+m4_define(['m4_asm_ECALL'],  ['32'b00000000000000000000000001110011'])
+m4_define(['m4_asm_EBREAK'], ['32'b00000000000100000000000001110011'])
+m4_define(['m4_asm_MRET'],   ['32'b00110000001000000000000001110011'])
+m4_define(['m4_asm_WFI'],    ['32'b00010000010100000000000001110011'])
+m4_asm(ADDI,  x1,  x0,  10100100)            //   0  x1 = 164 (handler address)
+m4_asm(CSRRW, x0,  x1,  1100000101)          //   4  mtvec = 164
+m4_asm(ADDI,  x2,  x0,  111111111111)        //   8  x2 = -1 = 0xFFFFFFFF (rollover seed)
+m4_asm(ADDI,  x3,  x0,  100000000)           //  12  x3 = 0x100
+m4_asm(ADDI,  x4,  x0,  1010101011)          //  16  x4 = 0x2AB
+
+   // ---- A: the mhpm* blocks must read zero and must NOT trap ----
+m4_asm(CSRRS, x5,  x0,  101100000011)        //  20  mhpmcounter3   (0xB03)
+m4_asm(CSRRS, x6,  x0,  101100011111)        //  24  mhpmcounter31  (0xB1F)
+m4_asm(CSRRS, x7,  x0,  101110000011)        //  28  mhpmcounterh3  (0xB83)
+m4_asm(CSRRS, x8,  x0,  101110011111)        //  32  mhpmcounterh31 (0xB9F)
+m4_asm(CSRRS, x9,  x0,  1100100011)          //  36  mhpmevent3     (0x323)
+m4_asm(CSRRS, x10, x0,  1100111111)          //  40  mhpmevent31    (0x33F)
+m4_asm(CSRRW, x0,  x2,  101100000011)        //  44  write 0xFFFFFFFF to 0xB03 -- legal, dropped
+m4_asm(CSRRS, x11, x0,  101100000011)        //  48  x11 = 0xB03, still 0 (WARL hardwired zero)
+
+   // ---- A': the >= 3 boundary -- one address below each block must still TRAP ----
+m4_asm(ADDI,  x12, x0,  1000101011)          //  52  x12 = 555 canary
+m4_asm(ADDI,  x13, x0,  1000101011)          //  56  x13 = 555 canary
+m4_asm(CSRRS, x12, x0,  101100000001)        //  60  0xB01 reserved -> TRAP 1, cause 2
+m4_asm(CSRRS, x13, x0,  1100100000)          //  64  0x320 mcountinhibit -> TRAP 2, cause 2
+
+   // ---- B: the high halves exist, and a write hits ONLY the addressed half ----
+m4_asm(CSRRW, x0,  x3,  101100000000)        //  68  mcycle  <= 0x100
+m4_asm(CSRRW, x0,  x4,  101110000000)        //  72  mcycleh <= 0x2AB (mcycle ticks to 0x101)
+m4_asm(CSRRS, x14, x0,  101100000000)        //  76  x14 = mcycle  = 0x101 -- low half survived
+m4_asm(CSRRS, x15, x0,  101110000000)        //  80  x15 = mcycleh = 0x2AB
+m4_asm(CSRRW, x0,  x4,  101110000010)        //  84  minstreth <= 0x2AB
+m4_asm(CSRRS, x16, x0,  101110000010)        //  88  x16 = minstreth = 0x2AB
+
+   // ---- C1: mcycle rollover on a cycle that DOES retire ----
+m4_asm(CSRRW, x0,  x2,  101100000000)        //  92  mcycle <= 0xFFFFFFFF (a WRITE: must not carry)
+m4_asm(ADDI,  x17, x0,  1)                   //  96  retiring instruction; THIS is the rollover cycle
+m4_asm(CSRRS, x18, x0,  101110000000)        // 100  x18 = mcycleh = 0x2AC
+
+   // ---- C2: mcycle rollover on a cycle that does NOT retire -- the load-bearing probe ----
+m4_asm(CSRRW, x0,  x2,  101100000000)        // 104  mcycle <= 0xFFFFFFFF
+m4_asm(ECALL)                                // 108  TRAP 3, cause 11. Does not retire, but the
+                                             //      CYCLE still happened, so mcycle must roll over
+m4_asm(CSRRS, x26, x0,  101110000000)        // 112  x26 = mcycleh = 0x2AD
+
+   // ---- C3: a WRITE of 0xFFFFFFFF is not a rollover ----
+m4_asm(CSRRW, x0,  x2,  101100000000)        // 116  mcycle <= 0xFFFFFFFF
+m4_asm(CSRRW, x0,  x3,  101100000000)        // 120  mcycle_old is 0xFFFFFFFF but this is a WRITE
+m4_asm(CSRRS, x27, x0,  101110000000)        // 124  x27 = mcycleh = 0x2AD, unchanged
+
+   // ---- D1: minstret rollover on a retiring instruction ----
+m4_asm(CSRRW, x0,  x2,  101100000010)        // 128  minstret <= 0xFFFFFFFF
+m4_asm(ADDI,  x28, x0,  1)                   // 132  retires -> minstret rolls over
+m4_asm(CSRRS, x29, x0,  101110000010)        // 136  x29 = minstreth = 0x2AC
+
+   // ---- D2: the mirror of C2 -- a non-retiring cycle must NOT roll minstret over ----
+m4_asm(CSRRW, x0,  x2,  101100000010)        // 140  minstret <= 0xFFFFFFFF
+m4_asm(EBREAK)                               // 144  TRAP 4, cause 3. minstret must HOLD, so the
+                                             //      carry waits for the handler's first instruction
+m4_asm(CSRRS, x31, x0,  101110000010)        // 148  x31 = minstreth = 0x2AD (exactly one carry)
+
+m4_asm(WFI)                                  // 152  must decode as a legal NOP, must NOT trap
+m4_asm(ADDI,  x19, x0,  101010)              // 156  x19 = 42, sentinel: main path completed
+m4_asm(BGE,   x0,  x0,  0)                   // 160  halt
+
+   // ---- shared handler ----
+m4_asm(CSRRS, x22, x0,  1101000001)          // 164  handler: x22 = mepc
+m4_asm(CSRRS, x23, x0,  1101000010)          // 168  x23 = mcause
+m4_asm(ADD,   x20, x20, x23)                 // 172  x20 += mcause
+m4_asm(ADDI,  x21, x21, 1)                   // 176  x21 += 1 (trap counter)
+m4_asm(ADDI,  x25, x22, 100)                 // 180  x25 = mepc + 4
+m4_asm(CSRRW, x0,  x25, 1101000001)          // 184  mepc = mepc + 4
+m4_asm(MRET)                                 // 188  -> PC = mepc
+m4_asm(ADDI,  x30, x0,  1111100111)          // 192  poison (999): must NEVER execute
+m4_asm(BGE,   x0,  x0,  0)                   // 196  handler halt (unreachable)
+m4_asm_end()
+
+
+Every counter probe here works by SEEDING the low half to 0xFFFFFFFF with a CSR write and then
+letting exactly one cycle elapse, so the rollover lands on an instruction this program chose. That
+is the only way to reach a 2^32 boundary in a 250-cycle simulation. It also means every expected
+value below is exact, not approximate: a CSR read returns $..._old, i.e. the value one cycle after
+the write, so mcycle read immediately after "mcycle <= 0x100" is 0x101, deterministically.
+
+mcycleh starts at 0x2AB (written at 72) and is expected to reach 0x2AD via two carries. A nonzero
+base is deliberate -- it distinguishes "the carry incremented the high half" from "something set
+the high half to 1".
+
+Expected Waveforms:
+Reg	Value		Why
+x1	000000A4	164, the handler address
+x2	FFFFFFFF	the rollover seed written into mcycle/minstret four times
+x3	00000100	0x100
+x4	000002AB	0x2AB, the high-half seed
+x5	00000000	mhpmcounter3 -- hardwired zero
+x6	00000000	mhpmcounter31 -- the top of the 0xB03-0xB1F range
+x7	00000000	mhpmcounterh3
+x8	00000000	mhpmcounterh31 -- top of 0xB83-0xB9F
+x9	00000000	mhpmevent3
+x10	00000000	mhpmevent31 -- top of 0x323-0x33F
+x11	00000000	0xB03 after writing 0xFFFFFFFF to it. Nonzero here means you gave it real storage; a trap here instead means the block was wrongly classified read-only
+x12	0000022B	555 canary UNCHANGED -- the read of 0xB01 trapped. Without the canary this is indistinguishable from a successful read of a hardwired-zero CSR, which is exactly the trap testcodes/11 documented
+x13	0000022B	555 canary UNCHANGED -- the read of 0x320 (mcountinhibit, deliberately not implemented) trapped
+x14	00000101	mcycle read one cycle after being written to 0x100. Proves the mcycleh write at 72 did NOT land in the low half -- a merged write would show 000002AB or 000002AC here
+x15	000002AB	mcycleh read back. Proves the high half has real storage and its own write port
+x16	000002AB	minstreth read back, same for the instruction counter
+x17	00000001	the dummy retiring instruction that carries mcycle in C1
+x18	000002AC	FIRST carry: mcycleh incremented by one on the rollover. Not 1 -- an increment, not a set
+x19	0000002A	42 -- sentinel proving the main path reached the end
+x20	00000012	18 = sum of mcause over four traps: 2 + 2 + 11 + 3
+x21	00000004	THE trap count: exactly the two deliberate boundary traps plus ECALL plus EBREAK
+x22	00000090	144 -- mepc of the LAST trap (the EBREAK)
+x23	00000003	mcause of the LAST trap = 3, breakpoint
+x25	00000094	148 -- mepc + 4 from the last trap
+x26	000002AD	THE probe. Second carry, taken on the ECALL's cycle. The ECALL does not retire, but the CYCLE elapsed, so mcycle rolled over and the carry is owed. A value of 000002AC means $mcycle_carry is gated on $retires
+x27	000002AD	unchanged after C3 -- writing 0xFFFFFFFF into mcycle is not a rollover. 000002AE means the carry is missing its !$mcycle_wr qualifier
+x28	00000001	the dummy retiring instruction that carries minstret in D1
+x29	000002AC	minstreth after exactly one carry
+x30	00000000	poison never written
+x31	000002AD	minstreth after D2: exactly ONE further carry, taken by the handler's first instruction, not by the EBREAK. See the note below -- the failure value here is dramatic
+
+Notes:
+- Read the two carry probes as a matched pair. They are the same experiment run against the two
+  counters, and the correct answer has OPPOSITE polarity:
+      x26 (mcycle)   the rollover cycle is an ECALL that does not retire -> the carry MUST fire
+      x31 (minstret) the rollover cycle is an EBREAK that does not retire -> the carry must NOT fire
+  The reason is that the carry qualifier has to match the increment condition of the half beneath
+  it. $mcycle increments unconditionally every cycle, so its carry is (!write && old==FFFFFFFF) and
+  nothing more. $minstret increments only on $retires, so its carry needs $retires too. Copying one
+  line to the other is the natural mistake and this pair is built to catch it in both directions.
+
+- x31's failure mode is loud rather than off-by-one. If $minstret_carry drops its $retires term,
+  minstret sits at 0xFFFFFFFF across the EBREAK, both shadow instructions AND the trap entry, and
+  the carry fires on every one of those cycles. Expect 000002B0 rather than 000002AD. A value one
+  greater than expected means something else; a value three greater means this.
+
+- x26's arithmetic does NOT depend on the handler length, unlike testcodes/13's group G. The carry
+  is taken by the ECALL's own cycle, before the handler is entered. x31's does not depend on it
+  either -- the carry is taken by whichever instruction retires first inside the handler, and there
+  is always exactly one such instruction. You can lengthen or shorten the handler without
+  invalidating this file.
+
+- If mcycleh/minstreth are missing from $csr_addr_valid, this test does not fail gracefully: the
+  CSRRW at 72 raises illegal-instruction, the handler skips it, and every subsequent counter probe
+  traps as well. Symptom is x21 in the teens with x15, x16, x18, x26, x27, x29 and x31 all zero.
+  Check $csr_addr_valid and the $csr_read_data mux before reading anything else in this table. Note
+  that the >= 3 term in the mhpmcounterh range decode deliberately excludes 0xB80 and 0xB82, so
+  they need explicit entries -- the range does not cover them.
+
+- Group A' is the boundary, and it is the half of the range decode that is easy to leave untested.
+  0xB03 must be legal while 0xB01 traps; 0x323 must be legal while 0x320 traps. A decode written as
+  a bare prefix match with no low-bit condition passes every probe in group A and fails here, with
+  x21 = 2 and x12 = x13 = 00000000.
+
+- x14 is the isolation probe and it is exact, not approximate. mcycle is written to 0x100 at 68, the
+  mcycleh write at 72 lets it tick once, and the read at 76 returns $mcycle_old = 0x101. If the two
+  CSR addresses are not distinguished at the write port this reads 000002AB or 000002AC.
+
+- WFI at 152 is not a Tier 5 item; it is here because it costs one instruction and it is the last
+  known decode gap. If it traps, x21 = 5 and x23 = 00000002. Remember it needs to be excluded from
+  the SYSTEM allowlist inside $illegal_instr, not just added to $decode_valid -- those are two
+  independent terms and satisfying one does not satisfy the other.
+
+- NOT covered: the 64-bit read tearing window (a software problem -- the ISA's answer is the
+  read-high / read-low / read-high-again retry loop, and hardware is required to do nothing about
+  it), mcycle's absolute value at any point (it is a property of your pipeline, not of the
+  architecture, and can never be signature-compared against a reference), and mcountinhibit, which
+  is deliberately unimplemented and is verified here only by the fact that it traps.

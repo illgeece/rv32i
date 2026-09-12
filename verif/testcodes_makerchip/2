@@ -1,0 +1,52 @@
+Program 2: Control Hazards
+m4_asm(ADDI,  x1,  x0, 101)              //   0  x1 = 5
+m4_asm(ADDI,  x2,  x0, 11)               //   4  x2 = 3
+m4_asm(ADDI,  x25, x0, 0)                //   8  poison mask = 0
+m4_asm(ADDI,  x30, x0, 0)                //  12  progress = 0
+m4_asm(ADDI,  x31, x0, 0)                //  16  scratch
+
+// ---- Taken branch, BOTH shadow slots distinct ----
+m4_asm(BEQ,   x2, x2, 1100)              //  20  taken, +12 -> 32
+m4_asm(ORI,   x25, x25, 1)               //  24  bit0: shadow slot 1
+m4_asm(ORI,   x25, x25, 10)              //  28  bit1: shadow slot 2
+m4_asm(ADDI,  x30, x30, 1)               //  32  progress = 1
+
+// ---- Wrong-path JAL must not redirect; real JAL link + shadow ----
+m4_asm(BEQ,   x2, x2, 1100)              //  36  taken, +12 -> 48
+m4_asm(JAL,   x0, 110)                   //  40  WRONG-PATH: +12 -> 52. Must NOT redirect
+m4_asm(ORI,   x25, x25, 100)             //  44  bit2: shadow slot 2
+m4_asm(JAL,   x26, 100)                  //  48  real JAL: +8 -> 56; x26 = 52
+m4_asm(ORI,   x25, x25, 1000)            //  52  bit3: JAL shadow / wrong-path JAL landed here
+m4_asm(ADDI,  x30, x30, 1)               //  56  progress = 2
+
+// ---- JALR: forwarded base, both shadow slots, wrong-path suppression ----
+m4_asm(AUIPC, x31, 0)                    //  60  x31 = 60
+m4_asm(BEQ,   x2, x2, 1100)              //  64  taken, +12 -> 76
+m4_asm(JALR,  x0, x31, 11100)            //  68  WRONG-PATH: 60+28 = 88. Must NOT redirect
+m4_asm(ORI,   x25, x25, 10000)           //  72  bit4: shadow slot 2
+m4_asm(JALR,  x27, x31, 100000)          //  76  real JALR: 60+32 = 92; x27 = 80
+m4_asm(ORI,   x25, x25, 100000)          //  80  bit5: JALR shadow slot 1
+m4_asm(ORI,   x25, x25, 1000000)         //  84  bit6: JALR shadow slot 2
+m4_asm(ORI,   x25, x25, 10000000)        //  88  bit7: wrong-path JALR landed here
+m4_asm(ADDI,  x30, x30, 1)               //  92  progress = 3 (JALR landing)
+
+// ---- Backward loop: predictor training + predicted-taken/not-taken recovery ----
+m4_asm(ADDI,  x31, x0, 101)              //  96  x31 = 5
+m4_asm(ADDI,  x31, x31, 111111111111)    // 100  x31 -= 1        <- loop top
+m4_asm(BNE,   x31, x0, 1111111111100)    // 104  -4 -> 100
+m4_asm(ADDI,  x30, x30, 1)               // 108  progress = 4 (loop exited)
+
+m4_asm(BEQ,   x1, x2, 1100)              // 112  NOT taken (5 != 3)
+m4_asm(ADDI,  x30, x30, 1)               // 116  progress = 5 (fallthrough confirmed)
+m4_asm(BGE,   x0, x0, 0)                 // 120  halt
+m4_asm_end()
+
+Expected Waveforms:
+Reg	Value	Note
+x1	5
+x2	3
+x25	0	all 8 poison bits squashed/unreached
+x26	52	JAL link
+x27	80	JALR link
+x30	5	progress counter, all 5 checkpoints hit
+x31	0	loop variable, ends at 0 after 5 decrements

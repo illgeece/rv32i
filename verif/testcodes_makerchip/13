@@ -1,0 +1,157 @@
+Tier 1 load/store address-misaligned verification: causes 4 and 6 raised at EX, mtval = the faulting effective address, and the three commit gates that must hold ($dmem_wr_en so a misaligned store cannot corrupt memory, $rf_wr_en so a misaligned load cannot write rd, $minstret so a trapped access does not retire). Includes negative controls proving byte ops never misalign and that non-memory instructions are not caught by the check. STANDALONE - swap this in alone, do not combine with testcodes/6,7,8,9,10,11,12.
+m4_define(['m4_asm_ECALL'],  ['32'b00000000000000000000000001110011'])
+m4_define(['m4_asm_EBREAK'], ['32'b00000000000100000000000001110011'])
+m4_define(['m4_asm_MRET'],   ['32'b00110000001000000000000001110011'])
+m4_asm(ADDI,  x1,  x0,  1111100)             //   0  x1 = 124 (handler address)
+m4_asm(CSRRW, x0,  x1,  1100000101)          //   4  mtvec = 124
+m4_asm(ADDI,  x3,  x0,  10101010101)         //   8  x3 = 0x555
+m4_asm(SW,    x0,  x3,  100000)              //  12  word @32 = 0x00000555  [aligned SW regression]
+m4_asm(ADDI,  x5,  x0,  111111111111)        //  16  x5 = -1 = 0xFFFFFFFF (destroyer payload)
+
+   // ---- A: negative controls -- byte ops never misalign, non-memory ops are not checked ----
+m4_asm(SB,    x0,  x5,  100001)              //  20  byte 33 = 0xFF, addr[1:0]=01, must NOT trap
+m4_asm(LB,    x8,  x0,  100001)              //  24  x8 = sext(0xFF), must NOT trap
+m4_asm(SB,    x0,  x5,  100010)              //  28  byte 34 = 0xFF, addr[1:0]=10, must NOT trap
+m4_asm(LBU,   x9,  x0,  100010)              //  32  x9 = zext(0xFF), must NOT trap
+m4_asm(ORI,   x28, x0,  11)                  //  36  x28 = 3. funct3=110 -> size 10 -> mask 11, and
+                                             //      $addr = 0+3 = 3. Traps ONLY if the check is not
+                                             //      gated on $is_load/$is_store
+   // canary word @32 is now 0x00FFFF55
+
+   // ---- B: misaligned SW -> cause 6, and the word underneath must SURVIVE ----
+m4_asm(SW,    x0,  x5,  100010)              //  40  addr 34 -> TRAP 1, cause 6, mtval 34
+m4_asm(ADD,   x10, x23, x0)                  //  44  x10 = mtval  of trap 1, must be 34
+m4_asm(ADD,   x11, x24, x0)                  //  48  x11 = mcause of trap 1, must be 6
+m4_asm(ADD,   x12, x22, x0)                  //  52  x12 = mepc   of trap 1, must be 40
+
+   // ---- C: misaligned LW -> cause 4, and rd must keep its canary ----
+m4_asm(ADDI,  x13, x0,  1000101011)          //  56  x13 = 555 canary
+m4_asm(LW,    x13, x0,  100001)              //  60  addr 33 -> TRAP 2, cause 4; x13 must stay 555
+m4_asm(ADD,   x14, x24, x0)                  //  64  x14 = mcause of trap 2, must be 4
+
+   // ---- D: halfword misalign, store and load, including the funct3=101 (LHU) path ----
+m4_asm(SH,    x0,  x5,  100001)              //  68  addr 33 -> TRAP 3, cause 6
+m4_asm(ADD,   x15, x24, x0)                  //  72  x15 = mcause of trap 3, must be 6
+m4_asm(LHU,   x13, x0,  100011)              //  76  addr 35 -> TRAP 4, cause 4; x13 STILL 555
+m4_asm(ADD,   x17, x23, x0)                  //  80  x17 = mtval of trap 4, must be 35
+
+   // ---- E: rd = x0 does not excuse the exception ----
+m4_asm(LW,    x0,  x0,  100010)              //  84  addr 34 -> TRAP 5, cause 4
+
+   // ---- F: aligned accesses still work, and the canary word is untouched ----
+m4_asm(LH,    x18, x0,  100000)              //  88  addr 32, aligned -> sext(0xFF55)
+m4_asm(LH,    x16, x0,  100010)              //  92  addr 34, aligned -> sext(0x00FF)
+m4_asm(LW,    x6,  x0,  100000)              //  96  x6 = the canary word, must be 0x00FFFF55
+
+   // ---- G: minstret must not count a trapped access ----
+m4_asm(CSRRS, x26, x0,  101100000010)        // 100  snapshot A = minstret (0xB02)
+m4_asm(SW,    x0,  x5,  100010)              // 104  addr 34 -> TRAP 6, cause 6
+m4_asm(CSRRS, x27, x0,  101100000010)        // 108  snapshot B = minstret
+m4_asm(SUB,   x7,  x27, x26)                 // 112  x7 = delta, must be 9
+
+m4_asm(ADDI,  x19, x0,  101010)              // 116  x19 = 42, sentinel: main path completed
+m4_asm(BGE,   x0,  x0,  0)                   // 120  halt
+
+   // ---- shared handler: snapshot mepc/mtval/mcause, count, skip the faulting instruction ----
+m4_asm(CSRRS, x22, x0,  1101000001)          // 124  handler: x22 = mepc
+m4_asm(CSRRS, x23, x0,  1101000011)          // 128  x23 = mtval  (0x343)
+m4_asm(CSRRS, x24, x0,  1101000010)          // 132  x24 = mcause (0x342)
+m4_asm(ADD,   x20, x20, x24)                 // 136  x20 += mcause
+m4_asm(ADDI,  x21, x21, 1)                   // 140  x21 += 1 (trap counter)
+m4_asm(ADDI,  x25, x22, 100)                 // 144  x25 = mepc + 4
+m4_asm(CSRRW, x0,  x25, 1101000001)          // 148  mepc = mepc + 4
+m4_asm(MRET)                                 // 152  -> PC = mepc
+m4_asm(ADDI,  x30, x0,  1111100111)          // 156  poison (999): must NEVER execute
+m4_asm(BGE,   x0,  x0,  0)                   // 160  handler halt (unreachable)
+m4_asm_end()
+
+
+All addressing uses x0 as the base register, so the immediate IS the byte address. The canary word
+is dmem word 8 (byte addresses 32-35). It is built in three aligned steps -- SW 0x555, then SB 0xFF
+into byte 33, then SB 0xFF into byte 34 -- giving 0x00FFFF55, a value with a distinct byte in every
+lane so a wrong-lane read is visible. Every misaligned store in this test targets that same word
+with payload 0xFFFFFFFF, so a broken $dmem_wr_en gate destroys the canary in a way x6 cannot miss.
+
+Expected Waveforms:
+Reg	Value		Why
+x1	0000007C	124, the handler address
+x3	00000555	the seed word written by the aligned SW at 12
+x5	FFFFFFFF	the destroyer payload every misaligned store tries to write
+x6	00FFFF55	THE memory-integrity check: the canary word after all six traps. Any misaligned store that reached the array shows up here -- a committed SW gives FFFFFFFF, a committed SH gives 00FFFFFF
+x7	00000009	minstret delta across one trapped store: 1 (the snapshot at 100 itself) + 8 (the handler) + 0 (the trapping SW). A value of 10 means the trapped access was counted as a retirement
+x8	FFFFFFFF	LB byte 33 = 0xFF sign-extends. Also proves a byte access at addr[1:0]=01 did not trap
+x9	000000FF	LBU byte 34 = 0xFF zero-extends. Also proves addr[1:0]=10 did not trap for a byte op
+x10	00000022	mtval of trap 1 = 34, the faulting effective address of the misaligned SW
+x11	00000006	mcause of trap 1 = 6, store/AMO address misaligned
+x12	00000028	mepc of trap 1 = 40, the address of the SW itself
+x13	0000022B	555 -- canary UNCHANGED across TWO trapping loads (the LW at 60 and the LHU at 76). This is the $rf_wr_en gate. Without the canary a failed gate would be invisible, since the loaded value would also be plausible
+x14	00000004	mcause of trap 2 = 4, load address misaligned. Together with x11 this is the only proof the 4-vs-6 selector is not inverted
+x15	00000006	mcause of trap 3 = 6, the misaligned SH
+x16	000000FF	LH at 34, aligned, upper half = 0x00FF, sign bit clear
+x17	00000023	mtval of trap 4 = 35, the misaligned LHU address. LHU is funct3=101, so this is the value that proves the size decode used funct3[1:0] and not the whole field
+x18	FFFFFF55	LH at 32, aligned, lower half = 0xFF55, sign bit set -> sign-extends negative
+x19	0000002A	42 -- sentinel proving the main path reached the end
+x20	0000001E	30 = sum of mcause over all six traps: 6 + 4 + 6 + 4 + 4 + 6
+x21	00000006	THE trap count: six, in order 6, 4, 6, 4, 4, 6
+x22	00000068	104 -- mepc of the LAST trap (the SW at 104)
+x23	00000022	34 -- mtval of the LAST trap
+x24	00000006	mcause of the LAST trap = 6
+x25	0000006C	108 -- mepc + 4 from the last trap
+x26	0000003C	60 -- minstret snapshot A. See the note below; this absolute value is the most fragile number in this table
+x27	00000045	69 -- minstret snapshot B
+x28	00000003	3 -- the ORI negative control. If this reads 0 with x21 = 7, the misalign check is not gated on $is_load/$is_store and is firing on an ALU op
+x30	00000000	poison never written -- address 156 sits in MRET's 2-instruction shadow on all six handler passes
+
+Notes:
+- Detection lives at EX (@2), not MEM (@3), because both of its inputs -- $addr and $funct3 -- are
+  ready there. That is what lets this exception reuse the existing $take_trap / $on_path machinery
+  unchanged, and it is why the $dmem_wr_en kill arrives a full stage before the array is written.
+  If any test in group B or G shows a corrupted x6, check the STAGE of the gate before the logic.
+
+- Group A is the half of this feature that is easy to get backwards. Two separate bugs live here and
+  they produce different trap counts:
+    x21 = 10, x8 = x9 = 0, x6 = 00000555   the size mask is wrong for byte accesses (probably
+                                           hardwired 2'b11), so all four byte ops trapped and the
+                                           canary was never built
+    x21 = 7,  x28 = 00000000               the check is not gated on $is_load/$is_store, so the ORI
+                                           at 36 trapped on its own $addr. Note that ADDI cannot
+                                           catch this -- funct3=000 maps to size 00 and mask 00, so
+                                           an ungated check is invisible to every ADDI in the
+                                           program. ORI (funct3=110 -> mask 11) is the only
+                                           instruction here that exposes it
+
+- x21 diagnostic table:
+    x21 = 6    correct
+    x21 = 5    one of the six is not firing; the wrong register names it:
+               x11 != 6  -> trap 1, misaligned SW
+               x14 != 4  -> trap 2, misaligned LW
+               x15 != 6  -> trap 3, misaligned SH
+               x17 != 23 -> trap 4, misaligned LHU (the funct3[1:0] path)
+               all of the above correct -> trap 5, the LW with rd=x0. That is the "loads to x0 must
+                 still take exceptions" rule; the check must not be gated on $rd_valid or $rd != 0
+               x7 = 1 with everything else right -> trap 6, the group G store
+    x21 = 0    $valid_misaligned_mem is not wired into $take_trap at all. Confirm with x6 =
+               FFFFFFFF and x13 clobbered -- every misaligned access committed
+
+- x7 is the only probe for the minstret gate, and it is a DELTA on purpose. The absolute values in
+  x26/x27 depend on the handler being exactly 8 instructions and on nothing above them changing, so
+  if you edit this program those two go stale while x7 stays valid. The arithmetic: minstret is read
+  as $minstret_old, i.e. the count of instructions retired strictly BEFORE the reading instruction.
+  Between the two snapshots the retirements are the snapshot at 100 itself (1) and the eight handler
+  instructions (8); the trapping SW at 104, its two shadow instructions, and the two instructions in
+  MRET's shadow all contribute nothing. 1 + 8 = 9.
+
+- Group F is a regression check, not a new feature: it confirms that adding the trap did not disturb
+  the aligned paths. x18 and x16 read the two halfword lanes of the same word and must differ in
+  sign-extension behavior, which also confirms the LH lane select still keys on $addr[1].
+
+- The canary word is built with two SB instructions that are NOT adjacent to each other (an LB sits
+  between them), and each store is verified by the load immediately after it. That load-after-store
+  distance of one instruction is the tightest this design supports without a forwarding path: the
+  /dmem array is written at @3 and re-read at @3 one cycle later through $RETAIN. If x8 or x9 is
+  wrong but x6 is right, suspect that timing rather than the misalign logic.
+
+- NOT covered: access faults (causes 1/5/7 -- optional, and this memory map cannot generate them),
+  misaligned accesses that CROSS a word boundary as opposed to merely sitting off-boundary (the
+  check is on $addr[1:0] alone, so there is no distinct case), and mtval for causes 4/6 when the
+  address is negative or above the 32-word dmem range.

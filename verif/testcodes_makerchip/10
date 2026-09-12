@@ -1,0 +1,50 @@
+Tier 3 mstatus/MRET verification: reads mstatus at three points (before trap, inside handler, after MRET) to observe the full MIE/MPIE push-pop state machine. Also exercises the tightest CSR dependency in the design -- CSRRW mepc immediately followed by MRET. STANDALONE - swap this in alone, do not combine with testcodes/6,7,8,9.
+m4_define(['m4_asm_ECALL'],  ['32'b00000000000000000000000001110011'])
+m4_define(['m4_asm_EBREAK'], ['32'b00000000000100000000000001110011'])
+m4_define(['m4_asm_MRET'],   ['32'b00110000001000000000000001110011'])
+m4_asm(ADDI,  x1, x0, 100000)                //  0  x1 = 32 (handler address)
+m4_asm(CSRRW, x0, x1, 1100000101)            //  4  mtvec = 32
+m4_asm(ADDI,  x2, x0, 1000)                  //  8  x2 = 8 (MIE bit)
+m4_asm(CSRRW, x0, x2, 1100000000)            // 12  mstatus = 8 -> MIE=1; MPP write ignored (stays M)
+m4_asm(CSRRS, x3, x0, 1100000000)            // 16  x3 = mstatus BEFORE trap
+m4_asm(ECALL)                                // 20  trap: mepc=20, mcause=11
+m4_asm(CSRRS, x9, x0, 1100000000)            // 24  RETURN POINT: x9 = mstatus AFTER mret
+m4_asm(BGE,   x0, x0, 0)                     // 28  halt
+m4_asm(CSRRS, x4, x0, 1100000000)            // 32  handler: x4 = mstatus IN handler
+m4_asm(CSRRS, x5, x0, 1101000001)            // 36  x5 = mepc
+m4_asm(CSRRS, x6, x0, 1101000010)            // 40  x6 = mcause
+m4_asm(ADDI,  x5, x5, 100)                   // 44  x5 = mepc + 4 = 24 (skip the ECALL on return)
+m4_asm(CSRRW, x0, x5, 1101000001)            // 48  mepc = 24
+m4_asm(MRET)                                 // 52  -> PC=24, MIE<=MPIE, MPIE<=1
+m4_asm(ADDI,  x30, x0, 1111100111)           // 56  poison (999): must NEVER execute
+m4_asm(BGE,   x0, x0, 0)                     // 60  handler halt (unreachable)
+m4_asm_end()
+
+
+mstatus bit map for this core (M-mode only): bit 3 = MIE, bit 7 = MPIE, bits 12:11 = MPP hardwired
+2'b11. Everything else is WPRI or an unimplemented field and reads zero, so MPP alone contributes
+the constant 0x1800 to every read below.
+
+Expected Waveforms:
+Reg	Value		Why
+x1	00000020	32, the handler address written to mtvec
+x2	00000008	8, the MIE bit position -- written to mstatus at 12
+x3	00001808	mstatus BEFORE the trap: MPP=11 (0x1800) + MIE=1 (bit 3). MPIE still 0. Proves the CSR write took MIE but discarded the MPP field and every WPRI bit
+x4	00001880	mstatus INSIDE the handler -- the TRAP PUSH: MPIE<=old MIE (=1, bit 7 set), MIE<=0 (bit 3 clear)
+x9	00001888	mstatus AFTER MRET -- the POP: MIE<=MPIE (=1) and MPIE<=1, so both bits 3 and 7 are set. This is the one-level stack resetting, not a restore
+x5	00000018	mepc read as 20 in the handler, then +4 = 24. Final value is the return address, and the CSRRW at 48 that consumed it sat one instruction ahead of the MRET
+x6	0000000B	mcause = 11, environment call from M-mode
+x30	00000000	poison never written -- the instruction at 56 is inside MRET's 2-instruction shadow and is squashed by $on_path
+
+Notes:
+- x9 is the load-bearing value. Address 24 is fetched twice: the first pass is in the ECALL's
+  2-instruction shadow and is squashed, the second pass is the MRET target and executes. If MRET
+  restored only PC (the pre-Tier-3 behavior) x9 would read 00001880, identical to x4 -- the two
+  values differing only in bit 3 is the whole proof that the pop happened.
+- The CSRRW mepc at 48 and the MRET at 52 are adjacent, so MRET's $mepc_old is the value the
+  immediately preceding instruction wrote. This passing confirms that CSR state living entirely
+  in @2 needs no forwarding path: >>1$mepc is by construction post-commit for every older
+  instruction.
+- NOT covered: mepc's low-bit hardwiring. This test writes mepc = 24, which is already 4-aligned,
+  so it passes with or without the {$csr_new_value[31:2], 2'b0} mask on the mepc write port. A
+  separate test that writes an odd value to mepc before MRET is needed to cover that.

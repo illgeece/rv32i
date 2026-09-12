@@ -1,0 +1,5 @@
+# The whole flow runs under WSL/Linux: shell scripts, Python, assembly and the
+# linker scripts are all consumed by Linux tools. Git for Windows defaults to
+# checking files out with CRLF, which breaks them ("$'\r': command not found").
+# Force LF everywhere, in the repo and in the working copy, on every platform.
+* text=auto eol=lf

@@ -1,0 +1,65 @@
+Program 3: Forwarding and Memory
+*do not insert more instructions past n=156 as that would cause the BHT to incorrectly train and cause a stuck loop
+m4_asm(ADDI, x1,  x0, 101)               //   0  x1 = 5
+m4_asm(ADDI, x25, x0, 0)                 //   4  poison mask = 0
+m4_asm(ADDI, x30, x0, 0)                 //   8  progress = 0
+
+// ---- ALU forwarding, distance 1 (three chained dependents) ----
+m4_asm(ADDI, x31, x0, 1)                 //  12  1
+m4_asm(ADDI, x31, x31, 1)                //  16  2
+m4_asm(ADDI, x31, x31, 1)                //  20  3
+m4_asm(XORI, x31, x31, 11)               //  24  3^3 = 0 if correct
+m4_asm(BEQ,  x31, x0, 1000)              //  28  skip poison if 0
+m4_asm(ORI,  x25, x25, 1)                //  32  bit0: ALU forward dist-1
+m4_asm(ADDI, x30, x30, 1)                //  36  progress = 1
+
+// ---- ALU forwarding, distance 2 ----
+m4_asm(ADDI, x31, x0, 101)               //  40  5
+m4_asm(ADDI, x29, x0, 0)                 //  44  filler
+m4_asm(XORI, x31, x31, 101)              //  48  5^5 = 0
+m4_asm(BEQ,  x31, x0, 1000)              //  52
+m4_asm(ORI,  x25, x25, 10)               //  56  bit1: ALU forward dist-2
+m4_asm(ADDI, x30, x30, 1)                //  60  progress = 2
+
+// ---- Load-use forwarding, distance 1 ----
+m4_asm(SW,   x0, x1, 0)                  //  64  mem[word0] = 5
+m4_asm(LW,   x31, x0, 0)                 //  68  x31 = 5
+m4_asm(XORI, x31, x31, 101)              //  72  consumes $ld_data via fwd
+m4_asm(BEQ,  x31, x0, 1000)              //  76
+m4_asm(ORI,  x25, x25, 100)              //  80  bit2: load-use dist-1
+m4_asm(ADDI, x30, x30, 1)                //  84  progress = 3
+
+// ---- Load-use forwarding, distance 2 ----
+m4_asm(LW,   x31, x0, 0)                 //  88  x31 = 5
+m4_asm(ADDI, x29, x0, 0)                 //  92  filler
+m4_asm(XORI, x31, x31, 101)              //  96
+m4_asm(BEQ,  x31, x0, 1000)              // 100
+m4_asm(ORI,  x25, x25, 1000)             // 104  bit3: load-use dist-2
+m4_asm(ADDI, x30, x30, 1)                // 108  progress = 4
+
+// ---- Store data forwarding + nonzero dmem address ----
+m4_asm(ADDI, x31, x0, 1010)              // 112  x31 = 10
+m4_asm(SW,   x0, x31, 100)               // 116  addr 4 -> word 1; rs2 forwarded dist-1
+m4_asm(LW,   x31, x0, 100)               // 120  x31 = 10
+m4_asm(XORI, x31, x31, 1010)             // 124
+m4_asm(BEQ,  x31, x0, 1000)              // 128
+m4_asm(ORI,  x25, x25, 10000)            // 132  bit4: store data fwd / dmem addressing
+m4_asm(ADDI, x30, x30, 1)                // 136  progress = 5
+
+// ---- x0 stays zero ----
+m4_asm(ADDI, x0, x0, 1)                  // 140  attempt to write x0
+m4_asm(BEQ,  x0, x31, 1000)              // 144  x31 = 0 here; skip poison if x0 == 0
+m4_asm(ORI,  x25, x25, 100000)           // 148  bit5: x0 was writable
+m4_asm(BGE,  x0, x0, 0)                  // 152  halt
+m4_asm_end()
+
+Expected Waveforms:
+Reg	Value	Note
+x1	5
+x25	0	all 6 poison bits squashed
+x29	0	filler, unused
+x30	5	progress counter
+x31	0	final value after last XORI
+x0	0	write attempt at addr 140 correctly suppressed
+mem[word 0] = 5
+mem[word 1] = 10

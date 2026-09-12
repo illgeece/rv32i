@@ -1,0 +1,93 @@
+testing DMEM
+m4_define(['m4_asm_ECALL'],  ['32'b00000000000000000000000001110011'])
+m4_define(['m4_asm_EBREAK'], ['32'b00000000000100000000000001110011'])
+m4_define(['m4_asm_MRET'],   ['32'b00110000001000000000000001110011'])
+m4_asm(ADDI,  x28, x0,  10011100)        //   0  x28 = 156 (handler address)
+m4_asm(CSRRW, x0,  x28, 1100000101)      //   4  mtvec = 156
+m4_asm(ADDI,  x1,  x0,  0)               //   8  x1 = 0, dmem base
+
+   // ---- A: the array is zero-initialised, not X ----
+m4_asm(LW,    x6,  x1,  11111111100)     //  12  [2044] never written -> must read 0
+
+   // ---- B: four addresses that ALL collided at index 0 in the 32-word dmem ----
+m4_asm(ADDI,  x2,  x0,  100010001)       //  16  0x111
+m4_asm(ADDI,  x3,  x0,  1000100010)      //  20  0x222
+m4_asm(ADDI,  x4,  x0,  1100110011)      //  24  0x333
+m4_asm(ADDI,  x5,  x0,  10001000100)     //  28  0x444
+m4_asm(SW,    x1,  x2,  0)               //  32  [0]    <- 0x111   (old idx 0)
+m4_asm(SW,    x1,  x3,  10000000)        //  36  [128]  <- 0x222   (old idx 0)
+m4_asm(SW,    x1,  x4,  10000000000)     //  40  [1024] <- 0x333   (old idx 0)
+m4_asm(SW,    x1,  x5,  10010000000)     //  44  [1152] <- 0x444   (old idx 0)
+m4_asm(LW,    x7,  x1,  0)               //  48  0x111
+m4_asm(LW,    x8,  x1,  10000000)        //  52  0x222
+m4_asm(LW,    x9,  x1,  10000000000)     //  56  0x333
+m4_asm(LW,    x10, x1,  10010000000)     //  60  0x444
+
+   // ---- C: store then load the SAME address on the very next instruction ----
+m4_asm(ADDI,  x11, x0,  1010101010)      //  64  0x2AA
+m4_asm(SW,    x1,  x11, 1000000)         //  68  [64] <- 0x2AA
+m4_asm(LW,    x12, x1,  1000000)         //  72  reads it back one cycle later
+
+   // ---- D: byte/halfword lane logic, at an index far from 0 ----
+m4_asm(ADDI,  x13, x0,  10000001)        //  76  0x81
+m4_asm(SB,    x1,  x13, 1000000000)      //  80  [512] byte0
+m4_asm(ADDI,  x13, x0,  10)              //  84  0x02
+m4_asm(SB,    x1,  x13, 1000000001)      //  88  byte1
+m4_asm(ADDI,  x13, x0,  10000011)        //  92  0x83
+m4_asm(SB,    x1,  x13, 1000000010)      //  96  byte2
+m4_asm(ADDI,  x13, x0,  10000100)        // 100  0x84
+m4_asm(SB,    x1,  x13, 1000000011)      // 104  byte3
+m4_asm(LW,    x14, x1,  1000000000)      // 108  0x84838281
+m4_asm(LB,    x15, x1,  1000000011)      // 112  lane 3, sign-extended
+m4_asm(LBU,   x16, x1,  1000000010)      // 116  lane 2, zero-extended
+m4_asm(LH,    x17, x1,  1000000010)      // 120  upper half, sign-extended
+m4_asm(LHU,   x18, x1,  1000000000)      // 124  lower half, zero-extended
+
+   // ---- E: a trapping access must not touch the array or the register file ----
+m4_asm(ADDI,  x19, x0,  1111111111)      // 128  0x3FF poison
+m4_asm(ADDI,  x21, x0,  1000101011)      // 132  x21 = 555 canary
+m4_asm(SW,    x1,  x19, 10)              // 136  addr 2: misaligned SW -> TRAP 1, cause 6
+m4_asm(LW,    x20, x1,  0)               // 140  [0] must STILL be 0x111
+m4_asm(LW,    x21, x1,  1)               // 144  addr 1: misaligned LW -> TRAP 2, cause 4
+
+m4_asm(ADDI,  x22, x0,  101010)          // 148  x22 = 42, sentinel
+m4_asm(BGE,   x0,  x0,  0)               // 152  halt
+
+   // ---- shared handler ----
+m4_asm(CSRRS, x29, x0,  1101000001)      // 156  x29 = mepc
+m4_asm(CSRRS, x27, x0,  1101000010)      // 160  x27 = mcause
+m4_asm(ADD,   x26, x26, x27)             // 164  x26 += mcause
+m4_asm(ADDI,  x30, x30, 1)               // 168  trap counter
+m4_asm(ADDI,  x29, x29, 100)             // 172  mepc + 4
+m4_asm(CSRRW, x0,  x29, 1101000001)      // 176  mepc = mepc + 4
+m4_asm(MRET)                             // 180
+m4_asm(ADDI,  x31, x0,  1111100111)      // 184  poison (999): must NEVER execute
+m4_asm(BGE,   x0,  x0,  0)               // 188  handler halt (unreachable)
+m4_asm_end()
+
+Expected registers
+Reg	Value	What it proves
+x6	00000000	the initial zero-fill ran
+x7	00000111	[0]
+x8	00000222	[128] is its own word
+x9	00000333	[1024] is its own word
+x10	00000444	[1152] is its own word
+x12	000002AA	write lands on the edge, next cycle's read sees it
+x14	84838281	all four SB lanes merged, at index 128
+x15	FFFFFF84	LB lane 3 sign-extend
+x16	00000083	LBU lane 2 zero-extend
+x17	FFFF8483	LH upper half sign-extend
+x18	00000281	LHU lower half zero-extend
+x20	00000111	the trapping SW never reached the array
+x21	0000022B	555 intact — the trapping LW never wrote rd
+x22	0000002A	main path completed
+x26	0000000A	causes 6 + 4 — store vs load misalign distinguished
+x30	00000002	exactly two traps
+x31	00000000	poison never ran
+
+Failure signatures
+x7=x8=x9=x10=00000444 — the index is still narrow; check that $dmem_index[11:0] = $addr[13:2] and [0:DMEM_WORDS-1] agree.
+x6 is X, and the section-D loads are X — the initial block didn't take.
+x20=000003FF — the misaligned store committed; $dmem_wr_en's $retires gating broke.
+x12 correct but x7–x10 wrong — storage works, addressing doesn't.
+x14 correct but x8/x9/x10 wrong — lane logic is fine, so it's purely the index width.
